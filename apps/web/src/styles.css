@@ -113,6 +113,30 @@ nav button.active {
   margin-bottom: 18px;
 }
 
+.top-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.live-dot {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  padding: 0 12px;
+  color: #dbeafe;
+  font-family: "Fira Code", ui-monospace, monospace;
+  text-transform: capitalize;
+}
+
+.live-dot.healthy {
+  border-color: rgba(34, 197, 94, 0.48);
+  background: rgba(34, 197, 94, 0.12);
+  color: #bbf7d0;
+}
+
 .eyebrow {
   margin: 0;
   text-transform: uppercase;
@@ -160,6 +184,27 @@ h2 {
   grid-template-columns: repeat(4, minmax(140px, 1fr));
   gap: 10px;
   margin-bottom: 12px;
+}
+
+.live-strip {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  border: 1px solid rgba(125, 211, 252, 0.2);
+  border-radius: 8px;
+  background: rgba(14, 165, 233, 0.08);
+  padding: 10px 12px;
+}
+
+.live-strip span {
+  color: #9fb0c7;
+}
+
+.live-strip strong {
+  color: #e0f2fe;
+  font-family: "Fira Code", ui-monospace, monospace;
+  font-size: 0.9rem;
 }
 
 .status,
@@ -333,6 +378,15 @@ td {
   gap: 12px;
 }
 
+.form-grid.compact {
+  grid-template-columns: 1fr auto;
+  margin: 12px 0;
+}
+
+.align-end {
+  align-self: end;
+}
+
 .field {
   display: grid;
   gap: 6px;
@@ -419,6 +473,16 @@ input:focus-visible {
   .topbar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .top-actions,
+  .live-strip {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .form-grid.compact {
+    grid-template-columns: 1fr;
   }
 }
 

@@ -25,6 +25,10 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
   return true;
 });
 
+chrome.runtime.onConnectExternal.addListener((port) => {
+  void handleExternalPort(port);
+});
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   void handleInternalMessage(message).then(sendResponse);
   return true;
@@ -58,6 +62,41 @@ async function handleExternalMessage(message: unknown, sender: chrome.runtime.Me
   }
 }
 
+async function handleExternalPort(port: chrome.runtime.Port): Promise<void> {
+  if (!isAllowedOrigin(port.sender?.url, DEFAULT_ALLOWED_ORIGINS)) {
+    port.postMessage(fail("stream", "INVALID_ORIGIN", "This origin is not allowed to use SOC Watch Bridge."));
+    port.disconnect();
+    return;
+  }
+
+  let closed = false;
+  port.onDisconnect.addListener(() => {
+    closed = true;
+  });
+
+  port.onMessage.addListener((message) => {
+    void handleExternalMessage(message, port.sender ?? {}).then((response) => {
+      if (!closed) port.postMessage({ type: "soc-watch.response", response });
+    });
+  });
+
+  const pushSnapshot = async () => {
+    if (closed) return;
+    const snapshot = await collectLiveSnapshot();
+    await chrome.storage.local.set({ lastConnection: snapshot });
+    port.postMessage({ type: "soc-watch.snapshot", snapshot });
+  };
+
+  await pushSnapshot();
+  const interval = setInterval(() => {
+    if (closed) {
+      clearInterval(interval);
+      return;
+    }
+    void pushSnapshot();
+  }, 15000);
+}
+
 async function handleInternalMessage(message: unknown): Promise<BridgeResponse> {
   const started = performance.now();
   let requestId = "unknown";
@@ -71,6 +110,9 @@ async function handleInternalMessage(message: unknown): Promise<BridgeResponse> 
     requestId = request.requestId;
     const data = await dispatch(request);
     await setConnectedBadge(request.action);
+    if (request.action === "fleet.summary") {
+      await chrome.storage.local.set({ lastConnection: { state: "connected", updatedAt: new Date().toISOString(), fleet: data } });
+    }
     return ok(requestId, data, elapsed(started));
   } catch (error) {
     await setErrorBadge();
@@ -81,6 +123,42 @@ async function handleInternalMessage(message: unknown): Promise<BridgeResponse> 
       return fail(requestId, "INVALID_REQUEST", "The bridge request did not match the protocol schema.", elapsed(started), error.issues);
     }
     return fail(requestId, "INTERNAL_ERROR", "SOC Watch Bridge encountered an unexpected error.", elapsed(started));
+  }
+}
+
+async function collectLiveSnapshot(): Promise<Record<string, unknown>> {
+  const updatedAt = new Date().toISOString();
+  try {
+    const [kibana, fleet] = await Promise.all([getKibanaStatus(), getFleetSummary({})]);
+    await chrome.action.setBadgeText({ text: "ON" });
+    await chrome.action.setBadgeBackgroundColor({ color: "#16a34a" });
+    return {
+      state: "connected",
+      updatedAt,
+      kibana,
+      fleet
+    };
+  } catch (error) {
+    await setErrorBadge();
+    if (error instanceof BridgeOperationError) {
+      return {
+        state: "error",
+        updatedAt,
+        error: {
+          code: error.code,
+          message: error.message,
+          details: error.details
+        }
+      };
+    }
+    return {
+      state: "error",
+      updatedAt,
+      error: {
+        code: "INTERNAL_ERROR",
+        message: error instanceof Error ? error.message : "Unexpected bridge error"
+      }
+    };
   }
 }
 

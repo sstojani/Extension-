@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Activity,
@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import type { FleetSummary, KibanaStatus } from "@soc-watch/protocol";
 import type { DataViewSummary, SanitizedFleetAgent } from "@soc-watch/protocol";
-import { sendBridgeMessage } from "./bridge";
+import { connectBridgeStream, getExtensionId, saveExtensionId, sendBridgeMessage, type BridgeStream } from "./bridge";
 import "./styles.css";
 
 type Panel = "Dashboard" | "Infrastructure" | "Agents" | "IOC Search" | "Bulk Hunt" | "Logs" | "Watchlist" | "Alerts" | "Settings" | "Diagnostics";
@@ -41,6 +41,7 @@ function App() {
   const [active, setActive] = useState<Panel>("Dashboard");
   const [loading, setLoading] = useState(false);
   const [bridgeState, setBridgeState] = useState("Not checked");
+  const [streamState, setStreamState] = useState("Disconnected");
   const [kibana, setKibana] = useState<KibanaStatus | null>(null);
   const [fleet, setFleet] = useState<FleetSummary | null>(null);
   const [agents, setAgents] = useState<SanitizedFleetAgent[]>([]);
@@ -49,8 +50,52 @@ function App() {
   const [indexPattern, setIndexPattern] = useState("logs-*");
   const [iocResult, setIocResult] = useState<unknown>(null);
   const [lastError, setLastError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+  const [extensionId, setExtensionId] = useState(getExtensionId() ?? "");
+  const streamRef = useRef<BridgeStream | null>(null);
 
   const fleetTotal = useMemo(() => (fleet ? fleet.online + fleet.offline + fleet.error + fleet.inactive : 0), [fleet]);
+
+  useEffect(() => {
+    startLiveBridge();
+    return () => streamRef.current?.disconnect();
+  }, []);
+
+  function startLiveBridge() {
+    streamRef.current?.disconnect();
+    streamRef.current = connectBridgeStream({
+      onStatus(status, message) {
+        setStreamState(status);
+        if (status === "connected") {
+          setBridgeState("Bridge connected");
+          setLastError(null);
+        }
+        if (message) setLastError(message);
+      },
+      onSnapshot(snapshot) {
+        applySnapshot(snapshot);
+      }
+    });
+  }
+
+  function applySnapshot(snapshot: unknown) {
+    const record = typeof snapshot === "object" && snapshot !== null ? (snapshot as Record<string, unknown>) : {};
+    setLastUpdated(typeof record.updatedAt === "string" ? record.updatedAt : new Date().toISOString());
+    if (record.state === "connected") {
+      setBridgeState("Bridge connected");
+      setKibana(record.kibana as KibanaStatus);
+      setFleet(record.fleet as FleetSummary);
+      setLastError(null);
+      return;
+    }
+    const error = typeof record.error === "object" && record.error !== null ? (record.error as { message?: string; code?: string }) : undefined;
+    setLastError(error ? `${error.code ?? "ERROR"}: ${error.message ?? "Live bridge update failed."}` : "Live bridge update failed.");
+  }
+
+  function saveAndReconnectExtensionId() {
+    saveExtensionId(extensionId);
+    startLiveBridge();
+  }
 
   async function runProofCheck() {
     setLoading(true);
@@ -148,10 +193,15 @@ function App() {
             <p className="eyebrow">Internal Elastic Security Operations</p>
             <h1>{active}</h1>
           </div>
-          <button className="primary" onClick={runProofCheck} disabled={loading}>
-            <RefreshCw size={16} aria-hidden="true" className={loading ? "spin" : ""} />
-            <span>{loading ? "Checking" : "Run Bridge Proof"}</span>
-          </button>
+          <div className="top-actions">
+            <span className={`live-dot ${streamState === "connected" ? "healthy" : "unknown"}`}>
+              {streamState === "connected" ? "Live" : streamState}
+            </span>
+            <button className="primary" onClick={startLiveBridge} disabled={loading}>
+              <RefreshCw size={16} aria-hidden="true" className={loading ? "spin" : ""} />
+              <span>{loading ? "Checking" : "Reconnect"}</span>
+            </button>
+          </div>
         </header>
 
         <section className="status-strip" aria-label="Current SOC Watch status">
@@ -159,6 +209,10 @@ function App() {
           <StatusTile label="Kibana" value={kibana?.overall ?? "Unknown"} tone={kibana?.overall === "available" ? "healthy" : "unknown"} />
           <StatusTile label="Fleet Online" value={fleet ? String(fleet.online) : "--"} tone="healthy" />
           <StatusTile label="Fleet Offline" value={fleet ? String(fleet.offline) : "--"} tone={fleet?.offline ? "critical" : "unknown"} />
+        </section>
+        <section className="live-strip" aria-label="Live bridge connection">
+          <span>Updates automatically every 15 seconds</span>
+          <strong>{lastUpdated ? `Last update ${new Date(lastUpdated).toLocaleTimeString()}` : "Waiting for first update"}</strong>
         </section>
 
         {lastError ? (
@@ -178,7 +232,10 @@ function App() {
           <SettingsPanel
             dataViews={dataViews}
             indexPattern={indexPattern}
+            extensionId={extensionId}
             onIndexPatternChange={setIndexPattern}
+            onExtensionIdChange={setExtensionId}
+            onSaveExtensionId={saveAndReconnectExtensionId}
             onLoadDataViews={loadDataViews}
           />
         ) : null}
@@ -293,12 +350,18 @@ function Agents({ agents, onRefresh }: { agents: SanitizedFleetAgent[]; onRefres
 function SettingsPanel({
   dataViews,
   indexPattern,
+  extensionId,
   onIndexPatternChange,
+  onExtensionIdChange,
+  onSaveExtensionId,
   onLoadDataViews
 }: {
   dataViews: DataViewSummary[];
   indexPattern: string;
+  extensionId: string;
   onIndexPatternChange: (value: string) => void;
+  onExtensionIdChange: (value: string) => void;
+  onSaveExtensionId: () => void;
   onLoadDataViews: () => void;
 }) {
   return (
@@ -315,6 +378,16 @@ function SettingsPanel({
           <span>Selected index pattern</span>
           <input value={indexPattern} onChange={(event) => onIndexPatternChange(event.target.value)} />
         </label>
+        <div className="form-grid compact">
+          <label className="field">
+            <span>Extension ID</span>
+            <input value={extensionId} onChange={(event) => onExtensionIdChange(event.target.value)} />
+          </label>
+          <button className="secondary align-end" onClick={onSaveExtensionId}>
+            <RefreshCw size={16} aria-hidden="true" />
+            <span>Save and Reconnect</span>
+          </button>
+        </div>
         <div className="table-wrap">
           <table>
             <thead>

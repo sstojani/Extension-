@@ -11,6 +11,7 @@ const openKibana = document.getElementById("openKibana");
 const kibanaUrl = document.getElementById("kibanaUrl");
 
 void loadConfig();
+void restoreLastConnection();
 
 button.addEventListener("click", () => {
   void connect();
@@ -58,6 +59,14 @@ async function connect() {
     setState("connected", "Connected");
     button.textContent = "Connected";
     hint.textContent = "SOC Watch Bridge can reach Kibana/Fleet with your current Chrome session.";
+    await chrome.storage.local.set({
+      lastConnection: {
+        state: "connected",
+        updatedAt: new Date().toISOString(),
+        kibana: status.data,
+        fleet: summary.data
+      }
+    });
   } catch (error) {
     setState("error", "Connection failed");
     button.textContent = "Retry Connect";
@@ -69,6 +78,24 @@ async function connect() {
     details.textContent = hint.textContent;
   } finally {
     button.disabled = false;
+  }
+}
+
+async function restoreLastConnection() {
+  const stored = await chrome.storage.local.get(["lastConnection"]);
+  const last = stored.lastConnection;
+  if (!last || typeof last !== "object") return;
+  if (last.state === "connected") {
+    setState("connected", "Connected");
+    button.textContent = "Connected";
+    permission.textContent = "Allowed";
+    bridge.textContent = "Connected";
+    kibana.textContent = last.kibana?.overall ?? "available";
+    const online = last.fleet?.online ?? 0;
+    const offline = last.fleet?.offline ?? 0;
+    fleet.textContent = `${online} online / ${offline} offline`;
+    details.textContent = last.updatedAt ? `Updated ${new Date(last.updatedAt).toLocaleTimeString()}` : "None";
+    hint.textContent = "SOC Watch Bridge can reach Kibana/Fleet with your current Chrome session.";
   }
 }
 
