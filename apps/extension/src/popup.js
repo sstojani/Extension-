@@ -5,9 +5,14 @@ const bridge = document.getElementById("bridge");
 const kibana = document.getElementById("kibana");
 const fleet = document.getElementById("fleet");
 const hint = document.getElementById("hint");
+const openKibana = document.getElementById("openKibana");
 
 button.addEventListener("click", () => {
   void connect();
+});
+
+openKibana.addEventListener("click", () => {
+  chrome.tabs.create({ url: "https://10.10.254.202:8888" });
 });
 
 async function connect() {
@@ -21,15 +26,15 @@ async function connect() {
 
   try {
     const ping = await send("bridge.ping", {});
-    if (!ping.success) throw new Error(ping.error.message);
+    if (!ping.success) throw bridgeError(ping);
     bridge.textContent = "Connected";
 
     const status = await send("kibana.status", {});
-    if (!status.success) throw new Error(status.error.message);
+    if (!status.success) throw bridgeError(status);
     kibana.textContent = status.data?.overall ?? "Available";
 
     const summary = await send("fleet.summary", {});
-    if (!summary.success) throw new Error(summary.error.message);
+    if (!summary.success) throw bridgeError(summary);
     const online = summary.data?.online ?? 0;
     const offline = summary.data?.offline ?? 0;
     fleet.textContent = `${online} online / ${offline} offline`;
@@ -80,4 +85,10 @@ function send(action, params) {
 function setState(state, text) {
   popup.className = `popup ${state}`;
   subtitle.textContent = text;
+}
+
+function bridgeError(response) {
+  const code = response.error?.code ?? "UNKNOWN";
+  const message = response.error?.message ?? "Unable to connect.";
+  return new Error(`${code}: ${message}`);
 }

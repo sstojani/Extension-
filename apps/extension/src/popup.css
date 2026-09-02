@@ -96,7 +96,7 @@ dt,
 }
 
 .connect:focus-visible,
-a:focus-visible {
+.open-kibana:focus-visible {
   outline: 3px solid rgba(125, 211, 252, 0.72);
   outline-offset: 3px;
 }
@@ -118,12 +118,15 @@ dd {
   color: #f8fafc;
 }
 
-a {
+.open-kibana {
   display: grid;
   place-items: center;
   min-height: 44px;
+  width: 100%;
+  background: transparent;
   border-radius: 8px;
   color: #bfdbfe;
   border: 1px solid rgba(148, 163, 184, 0.24);
-  text-decoration: none;
+  cursor: pointer;
+  font: inherit;
 }

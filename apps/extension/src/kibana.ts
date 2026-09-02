@@ -130,16 +130,29 @@ export async function searchIOC(params: unknown) {
 }
 
 async function kibanaFetchJson(config: KibanaRuntimeConfig, path: string, init: RequestInit = {}): Promise<unknown> {
-  const response = await fetch(new URL(path, config.kibanaBaseUrl), {
-    ...init,
-    method: init.method ?? "GET",
-    credentials: "include",
-    headers: {
-      "content-type": "application/json",
-      "kbn-xsrf": "soc-watch",
-      ...init.headers
-    }
-  });
+  const url = new URL(path, config.kibanaBaseUrl);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      ...init,
+      method: init.method ?? "GET",
+      credentials: "include",
+      headers: {
+        "content-type": "application/json",
+        "kbn-xsrf": "soc-watch",
+        ...init.headers
+      }
+    });
+  } catch (error) {
+    throw new BridgeOperationError(
+      "KIBANA_UNREACHABLE",
+      "The extension could not reach Kibana. Open Kibana in Chrome first, accept any certificate warning, log in, then retry Connect.",
+      {
+        url: url.origin,
+        cause: error instanceof Error ? error.message : String(error)
+      }
+    );
+  }
 
   const contentType = response.headers.get("content-type") ?? "";
   if (response.status === 401 || response.redirected || contentType.includes("text/html")) {
@@ -150,7 +163,11 @@ async function kibanaFetchJson(config: KibanaRuntimeConfig, path: string, init: 
   if (response.status === 429) throw new BridgeOperationError("RATE_LIMITED", "Kibana rate limited this request.");
   if (!response.ok) throw new BridgeOperationError("KIBANA_UNREACHABLE", `Kibana returned HTTP ${response.status}.`);
 
-  return response.json();
+  try {
+    return await response.json();
+  } catch {
+    throw new BridgeOperationError("KIBANA_UNREACHABLE", "Kibana responded, but the response was not valid JSON.");
+  }
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

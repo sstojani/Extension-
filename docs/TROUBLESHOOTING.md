@@ -1,0 +1,15 @@
+# Troubleshooting
+
+## Extension Popup Shows Bridge Connected But Kibana Failed
+
+The extension service worker is running, but Chrome could not complete the Kibana request.
+
+Check:
+
+- Open `https://10.10.254.202:8888` in the same Chrome profile.
+- Accept the internal certificate warning if Chrome shows one.
+- Log in to Kibana normally.
+- Return to the SOC Watch Bridge popup and press `Connect`.
+- Confirm the extension is loaded from `apps/extension/dist`, not `apps/extension`.
+
+The popup maps network failures to `KIBANA_UNREACHABLE`, authentication failures to `KIBANA_AUTH_REQUIRED`, and permission failures to `KIBANA_FORBIDDEN`.
