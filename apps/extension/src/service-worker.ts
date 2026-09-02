@@ -62,6 +62,11 @@ async function handleInternalMessage(message: unknown): Promise<BridgeResponse> 
   const started = performance.now();
   let requestId = "unknown";
   try {
+    if (isInternalConfigMessage(message)) {
+      await chrome.storage.local.set({ kibanaBaseUrl: message.kibanaBaseUrl });
+      return ok(message.requestId, { saved: true }, elapsed(started));
+    }
+
     const request = parseBridgeRequest(message);
     requestId = request.requestId;
     const data = await dispatch(request);
@@ -76,6 +81,20 @@ async function handleInternalMessage(message: unknown): Promise<BridgeResponse> 
       return fail(requestId, "INVALID_REQUEST", "The bridge request did not match the protocol schema.", elapsed(started), error.issues);
     }
     return fail(requestId, "INTERNAL_ERROR", "SOC Watch Bridge encountered an unexpected error.", elapsed(started));
+  }
+}
+
+function isInternalConfigMessage(message: unknown): message is { type: "soc-watch.saveConfig"; requestId: string; kibanaBaseUrl: string } {
+  if (typeof message !== "object" || message === null) return false;
+  const record = message as Record<string, unknown>;
+  if (record.type !== "soc-watch.saveConfig") return false;
+  if (typeof record.requestId !== "string") return false;
+  if (typeof record.kibanaBaseUrl !== "string") return false;
+  try {
+    const url = new URL(record.kibanaBaseUrl);
+    return (url.protocol === "https:" || url.protocol === "http:") && url.hostname === "10.10.254.202";
+  } catch {
+    return false;
   }
 }
 
