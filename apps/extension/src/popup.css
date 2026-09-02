@@ -1,0 +1,129 @@
+:root {
+  color-scheme: dark;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #0b1220;
+  color: #f8fafc;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  width: 340px;
+  margin: 0;
+  background: #0b1220;
+}
+
+.popup {
+  display: grid;
+  gap: 14px;
+  min-height: 360px;
+  padding: 18px;
+  border-top: 5px solid #64748b;
+  transition: border-color 180ms ease, background 180ms ease;
+}
+
+.popup.connected {
+  border-color: #22c55e;
+  background: linear-gradient(180deg, rgba(34, 197, 94, 0.16), transparent 38%), #0b1220;
+}
+
+.popup.error {
+  border-color: #ef4444;
+  background: linear-gradient(180deg, rgba(239, 68, 68, 0.16), transparent 38%), #0b1220;
+}
+
+.popup.checking {
+  border-color: #38bdf8;
+}
+
+header {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.mark {
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+  background: #1e293b;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  position: relative;
+}
+
+.mark::after {
+  content: "S";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-weight: 800;
+  color: #f8fafc;
+}
+
+h1,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 1.05rem;
+}
+
+p,
+dt,
+.hint {
+  color: #9fb0c7;
+}
+
+.connect {
+  width: 100%;
+  min-height: 68px;
+  border: 0;
+  border-radius: 8px;
+  background: #22c55e;
+  color: #08111f;
+  font-size: 1.45rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.connect:disabled {
+  cursor: progress;
+  opacity: 0.75;
+}
+
+.connect:focus-visible,
+a:focus-visible {
+  outline: 3px solid rgba(125, 211, 252, 0.72);
+  outline-offset: 3px;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: 82px 1fr;
+  gap: 8px 12px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.78);
+}
+
+dd {
+  margin: 0;
+  text-align: right;
+  color: #f8fafc;
+}
+
+a {
+  display: grid;
+  place-items: center;
+  min-height: 44px;
+  border-radius: 8px;
+  color: #bfdbfe;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  text-decoration: none;
+}

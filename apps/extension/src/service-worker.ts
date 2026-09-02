@@ -25,6 +25,16 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
   return true;
 });
 
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  void handleInternalMessage(message).then(sendResponse);
+  return true;
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  void chrome.action.setBadgeText({ text: "OFF" });
+  void chrome.action.setBadgeBackgroundColor({ color: "#64748b" });
+});
+
 async function handleExternalMessage(message: unknown, sender: chrome.runtime.MessageSender): Promise<BridgeResponse> {
   const started = performance.now();
   let requestId = "unknown";
@@ -38,6 +48,27 @@ async function handleExternalMessage(message: unknown, sender: chrome.runtime.Me
     const data = await dispatch(request);
     return ok(requestId, data, elapsed(started));
   } catch (error) {
+    if (error instanceof BridgeOperationError) {
+      return fail(requestId, error.code, error.message, elapsed(started), error.details);
+    }
+    if (error instanceof ZodError) {
+      return fail(requestId, "INVALID_REQUEST", "The bridge request did not match the protocol schema.", elapsed(started), error.issues);
+    }
+    return fail(requestId, "INTERNAL_ERROR", "SOC Watch Bridge encountered an unexpected error.", elapsed(started));
+  }
+}
+
+async function handleInternalMessage(message: unknown): Promise<BridgeResponse> {
+  const started = performance.now();
+  let requestId = "unknown";
+  try {
+    const request = parseBridgeRequest(message);
+    requestId = request.requestId;
+    const data = await dispatch(request);
+    await setConnectedBadge(request.action);
+    return ok(requestId, data, elapsed(started));
+  } catch (error) {
+    await setErrorBadge();
     if (error instanceof BridgeOperationError) {
       return fail(requestId, error.code, error.message, elapsed(started), error.details);
     }
@@ -75,4 +106,15 @@ async function dispatch(request: BridgeRequest): Promise<unknown> {
 
 function elapsed(started: number): number {
   return Math.round(performance.now() - started);
+}
+
+async function setConnectedBadge(action: string): Promise<void> {
+  if (action !== "fleet.summary" && action !== "kibana.status") return;
+  await chrome.action.setBadgeText({ text: "ON" });
+  await chrome.action.setBadgeBackgroundColor({ color: "#16a34a" });
+}
+
+async function setErrorBadge(): Promise<void> {
+  await chrome.action.setBadgeText({ text: "ERR" });
+  await chrome.action.setBadgeBackgroundColor({ color: "#dc2626" });
 }

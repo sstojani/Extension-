@@ -10,9 +10,10 @@
     "type": "module"
   },
   "externally_connectable": {
-    "matches": ["https://socwatch.internal/*", "http://localhost:5173/*"]
+    "matches": ["https://socwatch.internal/*", "http://localhost:5173/*", "http://127.0.0.1:5173/*"]
   },
   "action": {
-    "default_title": "SOC Watch Bridge"
+    "default_title": "SOC Watch Bridge",
+    "default_popup": "popup.html"
   }
 }

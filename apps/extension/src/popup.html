@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SOC Watch Bridge</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="popup unknown" id="popup">
+      <header>
+        <span class="mark" aria-hidden="true"></span>
+        <div>
+          <h1>SOC Watch Bridge</h1>
+          <p id="subtitle">Not connected</p>
+        </div>
+      </header>
+
+      <button id="connect" class="connect" type="button">Connect</button>
+
+      <dl>
+        <dt>Bridge</dt>
+        <dd id="bridge">Waiting</dd>
+        <dt>Kibana</dt>
+        <dd id="kibana">Waiting</dd>
+        <dt>Fleet</dt>
+        <dd id="fleet">Waiting</dd>
+      </dl>
+
+      <a id="openKibana" href="https://10.10.254.202:8888" target="_blank" rel="noreferrer">Open Kibana</a>
+      <p class="hint" id="hint">Log in to Kibana first, then press Connect.</p>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
