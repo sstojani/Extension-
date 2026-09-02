@@ -15,3 +15,5 @@ Check:
 - Confirm the extension is loaded from `apps/extension/dist`, not `apps/extension`.
 
 The popup maps network failures to `KIBANA_UNREACHABLE`, authentication failures to `KIBANA_AUTH_REQUIRED`, and permission failures to `KIBANA_FORBIDDEN`.
+
+If the background service worker cannot fetch Kibana because Chrome blocks that network path, SOC Watch falls back to the already-open Kibana tab for read-only `GET` API checks. This fallback still does not read cookies, scrape HTML, or expose an arbitrary proxy.

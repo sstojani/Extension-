@@ -144,6 +144,10 @@ async function kibanaFetchJson(config: KibanaRuntimeConfig, path: string, init: 
       }
     });
   } catch (error) {
+    if ((init.method ?? "GET") === "GET") {
+      return kibanaTabFetchJson(config, path, error);
+    }
+
     throw new BridgeOperationError(
       "KIBANA_UNREACHABLE",
       "The extension could not reach Kibana. Allow site access for 10.10.254.202, open Kibana in Chrome, accept any certificate warning, log in, then retry Connect.",
@@ -172,4 +176,91 @@ async function kibanaFetchJson(config: KibanaRuntimeConfig, path: string, init: 
 
 function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+}
+
+async function kibanaTabFetchJson(
+  config: KibanaRuntimeConfig,
+  path: string,
+  originalError: unknown
+): Promise<unknown> {
+  const kibanaOrigin = new URL(config.kibanaBaseUrl).origin;
+  const tabs = await chrome.tabs.query({});
+  const kibanaTab = tabs.find((tab) => {
+    if (!tab.id || !tab.url) return false;
+    try {
+      return new URL(tab.url).origin === kibanaOrigin;
+    } catch {
+      return false;
+    }
+  });
+
+  if (!kibanaTab?.id) {
+    throw new BridgeOperationError(
+      "KIBANA_UNREACHABLE",
+      "The extension could not reach Kibana from the background worker and no open Kibana tab was found. Open Kibana, log in, then retry Connect.",
+      {
+        url: kibanaOrigin,
+        cause: originalError instanceof Error ? originalError.message : String(originalError)
+      }
+    );
+  }
+
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId: kibanaTab.id },
+    func: async (apiPath: string) => {
+      const response = await fetch(apiPath, {
+        method: "GET",
+        credentials: "include",
+        headers: {
+          "content-type": "application/json",
+          "kbn-xsrf": "soc-watch"
+        }
+      });
+      const contentType = response.headers.get("content-type") ?? "";
+      const text = await response.text();
+      let json: unknown = null;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        json = null;
+      }
+      return {
+        ok: response.ok,
+        status: response.status,
+        redirected: response.redirected,
+        contentType,
+        json,
+        textPrefix: text.slice(0, 120)
+      };
+    },
+    args: [path]
+  });
+
+  const value = result?.result as
+    | {
+        ok: boolean;
+        status: number;
+        redirected: boolean;
+        contentType: string;
+        json: unknown;
+        textPrefix: string;
+      }
+    | undefined;
+
+  if (!value) {
+    throw new BridgeOperationError("KIBANA_UNREACHABLE", "The open Kibana tab did not return a bridge fetch result.");
+  }
+  if (value.status === 401 || value.redirected || value.contentType.includes("text/html")) {
+    throw new BridgeOperationError("KIBANA_AUTH_REQUIRED", "Kibana authentication is required.");
+  }
+  if (value.status === 403) throw new BridgeOperationError("KIBANA_FORBIDDEN", "The current Kibana user is not permitted to perform this read operation.");
+  if (value.status === 404) throw new BridgeOperationError("KIBANA_NOT_FOUND", "The Kibana endpoint or resource was not found.");
+  if (value.status === 429) throw new BridgeOperationError("RATE_LIMITED", "Kibana rate limited this request.");
+  if (!value.ok) throw new BridgeOperationError("KIBANA_UNREACHABLE", `Kibana tab returned HTTP ${value.status}.`);
+  if (value.json === null) {
+    throw new BridgeOperationError("KIBANA_UNREACHABLE", "Kibana tab responded, but the response was not valid JSON.", {
+      textPrefix: value.textPrefix
+    });
+  }
+  return value.json;
 }
