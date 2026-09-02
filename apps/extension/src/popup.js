@@ -1,6 +1,7 @@
 const popup = document.getElementById("popup");
 const button = document.getElementById("connect");
 const subtitle = document.getElementById("subtitle");
+const permission = document.getElementById("permission");
 const bridge = document.getElementById("bridge");
 const kibana = document.getElementById("kibana");
 const fleet = document.getElementById("fleet");
@@ -19,12 +20,20 @@ async function connect() {
   setState("checking", "Checking bridge");
   button.disabled = true;
   button.textContent = "Connecting";
+  permission.textContent = "Checking";
   bridge.textContent = "Checking";
   kibana.textContent = "Checking";
   fleet.textContent = "Checking";
-  hint.textContent = "Checking the extension, Kibana status, and Fleet access.";
+  hint.textContent = "Requesting site access, then checking Kibana and Fleet.";
 
   try {
+    const hasPermission = await ensureKibanaPermission();
+    if (!hasPermission) {
+      permission.textContent = "Denied";
+      throw new Error("KIBANA_UNREACHABLE: Chrome site access for https://10.10.254.202 is required.");
+    }
+    permission.textContent = "Allowed";
+
     const ping = await send("bridge.ping", {});
     if (!ping.success) throw bridgeError(ping);
     bridge.textContent = "Connected";
@@ -46,12 +55,20 @@ async function connect() {
     setState("error", "Connection failed");
     button.textContent = "Retry Connect";
     bridge.textContent = bridge.textContent === "Checking" ? "Failed" : bridge.textContent;
+    permission.textContent = permission.textContent === "Checking" ? "Failed" : permission.textContent;
     kibana.textContent = kibana.textContent === "Checking" ? "Failed" : kibana.textContent;
     fleet.textContent = fleet.textContent === "Checking" ? "Failed" : fleet.textContent;
     hint.textContent = error instanceof Error ? error.message : "Unable to connect.";
   } finally {
     button.disabled = false;
   }
+}
+
+async function ensureKibanaPermission() {
+  const permissionRequest = { origins: ["https://10.10.254.202/*"] };
+  const alreadyAllowed = await chrome.permissions.contains(permissionRequest);
+  if (alreadyAllowed) return true;
+  return chrome.permissions.request(permissionRequest);
 }
 
 function send(action, params) {

@@ -146,7 +146,7 @@ async function kibanaFetchJson(config: KibanaRuntimeConfig, path: string, init: 
   } catch (error) {
     throw new BridgeOperationError(
       "KIBANA_UNREACHABLE",
-      "The extension could not reach Kibana. Open Kibana in Chrome first, accept any certificate warning, log in, then retry Connect.",
+      "The extension could not reach Kibana. Allow site access for 10.10.254.202, open Kibana in Chrome, accept any certificate warning, log in, then retry Connect.",
       {
         url: url.origin,
         cause: error instanceof Error ? error.message : String(error)

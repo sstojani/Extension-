@@ -7,6 +7,7 @@ The extension service worker is running, but Chrome could not complete the Kiban
 Check:
 
 - Open `https://10.10.254.202:8888` in the same Chrome profile.
+- Allow Chrome site access for `https://10.10.254.202/*`. Chrome displays the host without the `:8888` port, but it still covers the Kibana URL on port `8888`.
 - Accept the internal certificate warning if Chrome shows one.
 - Log in to Kibana normally.
 - Return to the SOC Watch Bridge popup and press `Connect`.

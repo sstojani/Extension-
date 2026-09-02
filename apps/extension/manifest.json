@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "SOC Watch Bridge",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Secure read-only bridge between SOC Watch and authenticated Kibana.",
   "permissions": ["storage", "alarms", "notifications"],
-  "host_permissions": ["https://10.10.254.202/*"],
+  "optional_host_permissions": ["https://10.10.254.202/*"],
   "background": {
     "service_worker": "service-worker.js",
     "type": "module"
