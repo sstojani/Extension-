@@ -1,0 +1,78 @@
+import { ZodError } from "zod";
+import {
+  fail,
+  isAllowedOrigin,
+  ok,
+  parseBridgeRequest,
+  type BridgeRequest,
+  type BridgeResponse
+} from "@soc-watch/protocol";
+import { DEFAULT_ALLOWED_ORIGINS } from "./config";
+import {
+  BridgeOperationError,
+  getDataView,
+  getFleetAgent,
+  getFleetIncomingData,
+  getFleetSummary,
+  getKibanaStatus,
+  listDataViews,
+  listFleetAgents,
+  searchIOC
+} from "./kibana";
+
+chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
+  void handleExternalMessage(message, sender).then(sendResponse);
+  return true;
+});
+
+async function handleExternalMessage(message: unknown, sender: chrome.runtime.MessageSender): Promise<BridgeResponse> {
+  const started = performance.now();
+  let requestId = "unknown";
+  try {
+    if (!isAllowedOrigin(sender.url, DEFAULT_ALLOWED_ORIGINS)) {
+      return fail(requestId, "INVALID_ORIGIN", "This origin is not allowed to use SOC Watch Bridge.", elapsed(started));
+    }
+
+    const request = parseBridgeRequest(message);
+    requestId = request.requestId;
+    const data = await dispatch(request);
+    return ok(requestId, data, elapsed(started));
+  } catch (error) {
+    if (error instanceof BridgeOperationError) {
+      return fail(requestId, error.code, error.message, elapsed(started), error.details);
+    }
+    if (error instanceof ZodError) {
+      return fail(requestId, "INVALID_REQUEST", "The bridge request did not match the protocol schema.", elapsed(started), error.issues);
+    }
+    return fail(requestId, "INTERNAL_ERROR", "SOC Watch Bridge encountered an unexpected error.", elapsed(started));
+  }
+}
+
+async function dispatch(request: BridgeRequest): Promise<unknown> {
+  switch (request.action) {
+    case "bridge.ping":
+      return { extension: "SOC Watch Bridge", version: chrome.runtime.getManifest().version, status: "ok" };
+    case "kibana.status":
+      return getKibanaStatus();
+    case "fleet.summary":
+      return getFleetSummary(request.params);
+    case "fleet.list":
+      return listFleetAgents(request.params);
+    case "fleet.get":
+      return getFleetAgent(request.params);
+    case "fleet.incomingData":
+      return getFleetIncomingData(request.params);
+    case "dataViews.list":
+      return listDataViews();
+    case "dataViews.get":
+      return getDataView(request.params);
+    case "ioc.search":
+      return searchIOC(request.params);
+    default:
+      throw new BridgeOperationError("INVALID_REQUEST", "This action is not implemented in the bridge yet.");
+  }
+}
+
+function elapsed(started: number): number {
+  return Math.round(performance.now() - started);
+}

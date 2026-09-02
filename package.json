@@ -1,0 +1,27 @@
+{
+  "name": "soc-watch",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SOC Watch internal ELK monitoring, threat hunting, and fleet health platform.",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w packages/protocol && npm run build -w packages/ioc && npm run build -w packages/health && npm run build -w apps/extension && npm run build -w apps/web",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.277",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3",
+    "vitest": "^2.1.8"
+  }
+}

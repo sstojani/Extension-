@@ -1,0 +1,22 @@
+{
+  "name": "@soc-watch/extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build && node scripts/copy-manifest.mjs",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@soc-watch/ioc": "0.1.0",
+    "@soc-watch/protocol": "0.1.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.277",
+    "vite": "^6.0.3",
+    "vitest": "^2.1.8"
+  }
+}
