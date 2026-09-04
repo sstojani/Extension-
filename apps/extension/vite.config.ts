@@ -5,14 +5,13 @@ export default defineConfig({
     emptyOutDir: true,
     outDir: "dist",
     sourcemap: true,
-    lib: {
-      entry: "src/service-worker.ts",
-      formats: ["es"],
-      fileName: () => "service-worker.js"
-    },
     rollupOptions: {
+      input: {
+        "service-worker": "src/service-worker.ts",
+        "content-script": "src/content-script.ts"
+      },
       output: {
-        entryFileNames: "service-worker.js"
+        entryFileNames: "[name].js"
       }
     }
   }

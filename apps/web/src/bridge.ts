@@ -26,15 +26,7 @@ export async function sendBridgeMessage<TParams, TData>(action: BridgeAction, pa
 
   const extensionId = getExtensionId();
   if (!extensionId || !globalThis.chrome?.runtime?.sendMessage) {
-    return {
-      version: 1,
-      requestId: request.requestId,
-      success: false,
-      error: {
-        code: "BRIDGE_NOT_INSTALLED",
-        message: "SOC Watch Bridge is not configured or Chrome extension messaging is unavailable."
-      }
-    };
+    return sendViaWindowRelay<TParams, TData>(request);
   }
 
   return new Promise((resolve) => {
@@ -64,8 +56,7 @@ export function connectBridgeStream(options: {
 }): BridgeStream | null {
   const extensionId = getExtensionId();
   if (!extensionId || !globalThis.chrome?.runtime?.connect) {
-    options.onStatus("unavailable", "SOC Watch Bridge is not configured or Chrome extension messaging is unavailable.");
-    return null;
+    return connectWindowRelay(options);
   }
 
   options.onStatus("connecting");
@@ -73,8 +64,7 @@ export function connectBridgeStream(options: {
   try {
     port = chrome.runtime.connect(extensionId, { name: "soc-watch-live" });
   } catch (error) {
-    options.onStatus("unavailable", error instanceof Error ? error.message : "Unable to connect to SOC Watch Bridge.");
-    return null;
+    return connectWindowRelay(options);
   }
 
   port.onMessage.addListener((message: unknown) => {
@@ -108,4 +98,106 @@ export function connectBridgeStream(options: {
       port.disconnect();
     }
   };
+}
+
+function connectWindowRelay(options: {
+  onSnapshot: (snapshot: unknown) => void;
+  onResponse?: (response: BridgeResponse) => void;
+  onStatus: (status: "connecting" | "connected" | "disconnected" | "unavailable", message?: string) => void;
+}): BridgeStream {
+  options.onStatus("connecting", "Waiting for SOC Watch Bridge page relay.");
+  let disconnected = false;
+  let ready = false;
+
+  const listener = (event: MessageEvent) => {
+    if (event.source !== window || event.origin !== window.location.origin) return;
+    const data = typeof event.data === "object" && event.data !== null ? (event.data as Record<string, unknown>) : {};
+    if (data.source !== "soc-watch-content") return;
+    const envelope = typeof data.message === "object" && data.message !== null ? (data.message as Record<string, unknown>) : {};
+    if (envelope.type === "soc-watch.relay-ready") {
+      ready = true;
+      options.onStatus("connecting", "SOC Watch page relay is ready. Waiting for live data.");
+      return;
+    }
+    if (envelope.type === "soc-watch.disconnected") {
+      options.onStatus("disconnected", typeof envelope.reason === "string" ? envelope.reason : "SOC Watch Bridge disconnected.");
+      return;
+    }
+    if (envelope.type === "soc-watch.snapshot") {
+      ready = true;
+      options.onStatus("connected");
+      options.onSnapshot(envelope.snapshot);
+      return;
+    }
+    if (envelope.type === "soc-watch.response" && options.onResponse) {
+      options.onResponse(envelope.response as BridgeResponse);
+    }
+  };
+
+  window.addEventListener("message", listener);
+  window.postMessage({ source: "soc-watch-web", message: { type: "soc-watch.hello" } }, window.location.origin);
+
+  window.setTimeout(() => {
+    if (!ready && !disconnected) {
+      options.onStatus(
+        "unavailable",
+        "SOC Watch Bridge page relay was not found. Reload the extension in chrome://extensions, then reload this SOC Watch tab."
+      );
+    }
+  }, 15000);
+
+  return {
+    send<TParams>(action: BridgeAction, params: TParams) {
+      const request: BridgeRequest<TParams> = {
+        version: 1,
+        requestId: crypto.randomUUID(),
+        action,
+        params
+      };
+      window.postMessage({ source: "soc-watch-web", message: request }, window.location.origin);
+    },
+    disconnect() {
+      disconnected = true;
+      window.removeEventListener("message", listener);
+    }
+  };
+}
+
+function sendViaWindowRelay<TParams, TData>(request: BridgeRequest<TParams>): Promise<BridgeResponse<TData>> {
+  return new Promise((resolve) => {
+    const timeout = window.setTimeout(() => {
+      window.removeEventListener("message", listener);
+      resolve({
+        version: 1,
+        requestId: request.requestId,
+        success: false,
+        error: {
+          code: "BRIDGE_NOT_INSTALLED",
+          message: "SOC Watch Bridge page relay did not respond."
+        }
+      });
+    }, 15000);
+
+    const listener = (event: MessageEvent) => {
+      if (event.source !== window || event.origin !== window.location.origin) return;
+      const data = typeof event.data === "object" && event.data !== null ? (event.data as Record<string, unknown>) : {};
+      if (data.source !== "soc-watch-content") return;
+      const envelope = typeof data.message === "object" && data.message !== null ? (data.message as Record<string, unknown>) : {};
+      if (envelope.type !== "soc-watch.response") return;
+      const response = envelope.response as BridgeResponse<TData> | undefined;
+      if (!response || response.requestId !== request.requestId) return;
+      window.clearTimeout(timeout);
+      window.removeEventListener("message", listener);
+      resolve(response);
+    };
+
+    window.addEventListener("message", listener);
+    window.postMessage({ source: "soc-watch-web", message: request }, window.location.origin);
+  });
+}
+
+function isSocWatchWebOrigin(): boolean {
+  if (window.location.origin === "https://socwatch.internal") return true;
+  if (window.location.protocol !== "http:") return false;
+  return window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
 }

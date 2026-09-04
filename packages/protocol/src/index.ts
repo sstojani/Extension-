@@ -13,6 +13,12 @@ export const bridgeActions = [
   "fleet.incomingData",
   "ioc.search",
   "ioc.bulkSearch",
+  "threatIntel.dailyHunt",
+  "threatRadar.analyze",
+  "threatRadar.agent.configure",
+  "threatRadar.agent.run",
+  "config.get",
+  "config.save",
   "logs.search",
   "logs.lastSeen",
   "logs.volume",
@@ -214,6 +220,37 @@ export const iocSearchParamsSchema = z
   })
   .strict();
 
+export const dailyIocHuntParamsSchema = z
+  .object({
+    indexPattern: z.string().min(1).max(512),
+    timestampField: z.string().min(1).max(256).default("@timestamp"),
+    from: z.string().min(1).max(128).default("now-30d"),
+    to: z.string().min(1).max(128).default("now"),
+    size: z.number().int().min(0).max(25).default(5),
+    maxIocs: z.number().int().min(1).max(5000).default(1000)
+  })
+  .strict();
+
+export const threatRadarAnalyzeParamsSchema = z
+  .object({
+    indexPattern: z.string().min(1).max(512),
+    timestampField: z.string().min(1).max(256).default("@timestamp"),
+    from: z.string().min(1).max(128).default("now-15m"),
+    to: z.string().min(1).max(128).default("now"),
+    size: z.number().int().min(1).max(50).default(15)
+  })
+  .strict();
+
+export const threatRadarAgentConfigSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    intervalMinutes: z.number().int().min(5).max(60).default(15),
+    indexPattern: z.string().min(1).max(512).default("logs-*"),
+    timestampField: z.string().min(1).max(256).default("@timestamp"),
+    candidateExclusions: z.array(z.string().trim().min(1).max(256)).max(200).default([])
+  })
+  .strict();
+
 export function ok<T>(requestId: string, data: T, durationMs?: number): BridgeSuccess<T> {
   return withOptional({ version: BRIDGE_VERSION, requestId, success: true, data }, "durationMs", durationMs);
 }
@@ -236,8 +273,11 @@ export function parseBridgeRequest(value: unknown): BridgeRequest {
 export function isAllowedOrigin(senderUrl: string | undefined, allowedOrigins: readonly string[]): boolean {
   if (!senderUrl) return false;
   try {
-    const origin = new URL(senderUrl).origin;
-    return allowedOrigins.includes(origin);
+    const url = new URL(senderUrl);
+    return allowedOrigins.some((allowedOrigin) => {
+      const allowedUrl = new URL(allowedOrigin);
+      return url.protocol === allowedUrl.protocol && url.hostname === allowedUrl.hostname;
+    });
   } catch {
     return false;
   }

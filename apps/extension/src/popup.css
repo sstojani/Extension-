@@ -79,6 +79,10 @@ dt,
   color: #9fb0c7;
 }
 
+.version {
+  font-size: 0.78rem;
+}
+
 .connect {
   width: 100%;
   min-height: 68px;

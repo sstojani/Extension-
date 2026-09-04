@@ -5,3 +5,5 @@ await copyFile(new URL("../manifest.json", import.meta.url), new URL("../dist/ma
 await copyFile(new URL("../src/popup.html", import.meta.url), new URL("../dist/popup.html", import.meta.url));
 await copyFile(new URL("../src/popup.css", import.meta.url), new URL("../dist/popup.css", import.meta.url));
 await copyFile(new URL("../src/popup.js", import.meta.url), new URL("../dist/popup.js", import.meta.url));
+await copyFile(new URL("../src/icon-128.svg", import.meta.url), new URL("../dist/icon-128.svg", import.meta.url));
+await copyFile(new URL("../src/icon-128-off.svg", import.meta.url), new URL("../dist/icon-128-off.svg", import.meta.url));

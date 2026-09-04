@@ -1,19 +1,45 @@
 {
   "manifest_version": 3,
   "name": "SOC Watch Bridge",
-  "version": "0.1.5",
+  "version": "0.4.0",
   "description": "Secure read-only bridge between SOC Watch and authenticated Kibana.",
   "permissions": ["storage", "alarms", "notifications", "scripting", "tabs"],
-  "optional_host_permissions": ["https://10.10.254.202/*", "http://10.10.254.202/*"],
   "background": {
     "service_worker": "service-worker.js",
     "type": "module"
   },
+  "host_permissions": [
+    "https://10.10.254.202/*",
+    "http://10.10.254.202/*",
+    "https://socwatch.internal/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "https://threatfox-api.abuse.ch/*",
+    "https://mb-api.abuse.ch/*",
+    "https://urlhaus.abuse.ch/*",
+    "https://feodotracker.abuse.ch/*",
+    "https://openphish.com/*",
+    "https://threatview.io/*",
+    "https://www.virustotal.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://socwatch.internal/*", "http://localhost/*", "http://127.0.0.1/*"],
+      "js": ["content-script.js"],
+      "run_at": "document_start"
+    }
+  ],
   "externally_connectable": {
-    "matches": ["https://socwatch.internal/*", "http://localhost:5173/*", "http://127.0.0.1:5173/*"]
+    "matches": ["https://socwatch.internal/*", "http://localhost/*", "http://127.0.0.1/*"]
   },
   "action": {
     "default_title": "SOC Watch Bridge",
+    "default_icon": {
+      "128": "icon-128-off.svg"
+    },
     "default_popup": "popup.html"
+  },
+  "icons": {
+    "128": "icon-128.svg"
   }
 }

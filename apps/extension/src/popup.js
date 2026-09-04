@@ -1,6 +1,7 @@
 const popup = document.getElementById("popup");
 const button = document.getElementById("connect");
 const subtitle = document.getElementById("subtitle");
+const version = document.getElementById("version");
 const permission = document.getElementById("permission");
 const bridge = document.getElementById("bridge");
 const kibana = document.getElementById("kibana");
@@ -12,6 +13,7 @@ const kibanaUrl = document.getElementById("kibanaUrl");
 
 void loadConfig();
 void restoreLastConnection();
+version.textContent = `Version ${chrome.runtime.getManifest().version}`;
 
 button.addEventListener("click", () => {
   void connect();
