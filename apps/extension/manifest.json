@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SOC Watch Bridge",
-  "version": "0.4.0",
+  "version": "0.8.1",
   "description": "Secure read-only bridge between SOC Watch and authenticated Kibana.",
   "permissions": ["storage", "alarms", "notifications", "scripting", "tabs"],
   "background": {
@@ -20,7 +20,10 @@
     "https://feodotracker.abuse.ch/*",
     "https://openphish.com/*",
     "https://threatview.io/*",
-    "https://www.virustotal.com/*"
+    "https://www.virustotal.com/*",
+    "https://discord.com/api/webhooks/*",
+    "https://discordapp.com/api/webhooks/*",
+    "https://api.telegram.org/*"
   ],
   "content_scripts": [
     {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildIOCSearchBody } from "../src/search";
+import { buildIOCBulkSearchBody, buildIOCSearchBody } from "../src/search";
 
 describe("search adapter query generation", () => {
   it("builds bounded read-only IOC search DSL", () => {
@@ -19,5 +19,23 @@ describe("search adapter query generation", () => {
       }
     });
     expect(JSON.stringify(body)).not.toContain("DELETE");
+  });
+
+  it("builds one bounded aggregation query for a distinct IOC batch", () => {
+    const body = buildIOCBulkSearchBody({
+      iocs: [
+        { original: "1.2.3.4", normalized: "1.2.3.4", type: "ip" },
+        { original: "bad.example", normalized: "bad.example", type: "domain" }
+      ],
+      timestampField: "@timestamp",
+      from: "now-24h",
+      to: "now",
+      size: 5
+    });
+    const filters = body.aggs.ioc_matches.filters.filters as Record<string, unknown>;
+    expect(body.size).toBe(0);
+    expect(body.timeout).toBe("45s");
+    expect(Object.keys(filters)).toEqual(["ioc_0", "ioc_1"]);
+    expect(body.aggs.ioc_matches.aggs.latest.top_hits.size).toBe(5);
   });
 });

@@ -4,7 +4,8 @@ import {
   kibanaApiPath,
   parseBridgeRequest,
   sanitizeFleetAgent,
-  sanitizeFleetSummary
+  sanitizeFleetSummary,
+  dailyIocHuntParamsSchema
 } from "../src/index";
 
 describe("protocol validation", () => {
@@ -28,6 +29,14 @@ describe("protocol validation", () => {
         params: { url: "https://example.test" }
       })
     ).toThrow();
+  });
+
+  it("defaults IOC hunts to 500 indicators and accepts a batch offset", () => {
+    expect(dailyIocHuntParamsSchema.parse({ indexPattern: "logs-*" })).toMatchObject({
+      maxIocs: 500,
+      batchOffset: 0
+    });
+    expect(dailyIocHuntParamsSchema.parse({ indexPattern: "logs-*", maxIocs: 500, batchOffset: 500 }).batchOffset).toBe(500);
   });
 });
 

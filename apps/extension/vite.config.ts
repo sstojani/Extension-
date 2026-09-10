@@ -2,7 +2,9 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   build: {
-    emptyOutDir: true,
+    // Static MV3 files are copied into dist alongside the bundles.
+    // Keep them in place for watch builds so Chrome always sees a manifest.
+    emptyOutDir: false,
     outDir: "dist",
     sourcemap: true,
     rollupOptions: {

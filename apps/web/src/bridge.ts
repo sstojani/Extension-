@@ -16,6 +16,13 @@ export function saveExtensionId(value: string): void {
   localStorage.setItem("socWatchExtensionId", value.trim());
 }
 
+function bridgeTimeoutForAction(action: BridgeAction): number {
+  if (action === "threatIntel.dailyHunt") return 300000;
+  if (action === "threatRadar.analyze") return 300000;
+  if (action === "threatRadar.agent.run") return 120000;
+  return 20000;
+}
+
 export async function sendBridgeMessage<TParams, TData>(action: BridgeAction, params: TParams): Promise<BridgeResponse<TData>> {
   const request: BridgeRequest<TParams> = {
     version: 1,
@@ -30,8 +37,30 @@ export async function sendBridgeMessage<TParams, TData>(action: BridgeAction, pa
   }
 
   return new Promise((resolve) => {
+    const timeoutMs = bridgeTimeoutForAction(action);
+    let settled = false;
+    const timeout = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve({
+        version: 1,
+        requestId: request.requestId,
+        success: false,
+        error: {
+          code: action.startsWith("threatRadar") || action === "threatIntel.dailyHunt" ? "KIBANA_UNREACHABLE" : "BRIDGE_NOT_INSTALLED",
+          message: action === "threatIntel.dailyHunt"
+            ? "IOC Hunt did not return before the five-minute timeout. Check the extension service worker and Kibana response."
+            : action.startsWith("threatRadar")
+              ? "The Threat Radar scan did not return before the timeout. Check the extension service worker and Kibana query response."
+              : "SOC Watch Bridge did not respond before the timeout."
+        }
+      });
+    }, timeoutMs);
     chrome.runtime.sendMessage(extensionId, request, (response: BridgeResponse<TData> | undefined) => {
       const lastError = chrome.runtime.lastError;
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
       if (lastError || !response) {
         resolve({
           version: 1,
@@ -165,6 +194,7 @@ function connectWindowRelay(options: {
 
 function sendViaWindowRelay<TParams, TData>(request: BridgeRequest<TParams>): Promise<BridgeResponse<TData>> {
   return new Promise((resolve) => {
+    const timeoutMs = bridgeTimeoutForAction(request.action);
     const timeout = window.setTimeout(() => {
       window.removeEventListener("message", listener);
       resolve({
@@ -173,10 +203,12 @@ function sendViaWindowRelay<TParams, TData>(request: BridgeRequest<TParams>): Pr
         success: false,
         error: {
           code: "BRIDGE_NOT_INSTALLED",
-          message: "SOC Watch Bridge page relay did not respond."
+          message: request.action === "threatIntel.dailyHunt"
+            ? "IOC Hunt did not return before the five-minute timeout. Check the extension service worker and Kibana response."
+            : "SOC Watch Bridge page relay did not respond."
         }
       });
-    }, 15000);
+    }, timeoutMs);
 
     const listener = (event: MessageEvent) => {
       if (event.source !== window || event.origin !== window.location.origin) return;

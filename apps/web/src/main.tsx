@@ -3,6 +3,9 @@ import { createRoot } from "react-dom/client";
 import {
   Activity,
   AlertTriangle,
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
   Bell,
   ChevronLeft,
   ChevronRight,
@@ -13,12 +16,15 @@ import {
   ListChecks,
   MonitorCog,
   Play,
+  Plus,
   Radar,
   RefreshCw,
   Search,
   Server,
   Settings,
-  ShieldCheck
+  ShieldCheck,
+  Trash2,
+  X
 } from "lucide-react";
 import type { FleetSummary, KibanaStatus } from "@soc-watch/protocol";
 import type { DataViewSummary, SanitizedFleetAgent } from "@soc-watch/protocol";
@@ -31,9 +37,14 @@ type HuntStatus = "idle" | "running" | "complete";
 type HuntTimeRange = "today" | "last7d" | "last30d";
 type HuntFilter = "all" | "ip" | "domain" | "url" | "hash";
 type RadarTimeRange = "last15m" | "last1h" | "today";
-type RadarSort = "score-desc" | "score-asc" | "events-desc" | "events-asc" | "ip-asc" | "ip-desc";
-type RadarCardId = "sources" | "destinations" | "ports";
-type SettingsView = "agent" | "integrations" | "dataViews" | "connection";
+type RadarViewMode = "automatic" | "manual";
+type RadarSortDirection = "asc" | "desc";
+type RadarSortField = "sourceIp" | "destinationIp" | "score" | "gti" | "events" | "denied" | "outbound" | "infrastructure" | "ports" | "reasons" | "history";
+type RadarSort = { field: RadarSortField; direction: RadarSortDirection };
+type GtiLookupStatus = "scored" | "not_configured" | "pending" | "not_found" | "rate_limited" | "unauthorized" | "unavailable";
+type RadarCardId = "sources" | "destinations" | "outbound" | "denied" | "ports" | "indicators" | "review";
+type SettingsView = "agent" | "allowlist" | "integrations" | "dataViews" | "connection";
+type AllowlistScope = "ip" | "domain" | "hash" | "keyword";
 type RadarLayoutItem = { id: RadarCardId; width?: number; height?: number; x?: number; y?: number };
 type SearchHitSummary = {
   index: string;
@@ -77,6 +88,12 @@ type DailyHuntResponse = {
   matched: number;
   siemEvents: number;
   results: HuntResult[];
+  batchNumber: number;
+  batchOffset: number;
+  batchSize: number;
+  totalAvailable: number;
+  nextBatchOffset: number;
+  hasMore: boolean;
 };
 type ThreatRadarSuspect = {
   ip: string;
@@ -84,6 +101,7 @@ type ThreatRadarSuspect = {
   destinationIp: string;
   gtiIp: string;
   role: "source" | "destination";
+  direction: "inbound" | "outbound" | "internal" | "external" | "unknown";
   score: number;
   severity: "critical" | "high" | "medium" | "low";
   events: number;
@@ -94,6 +112,12 @@ type ThreatRadarSuspect = {
   topPorts: number[];
   actions: Array<{ key: string; count: number }>;
   datasets: Array<{ key: string; count: number }>;
+  deniedEvents: number;
+  successfulEvents: number;
+  outboundEvents: number;
+  suspiciousKeywordHits: number;
+  matchedKeywords: string[];
+  signalCounts?: Record<string, number>;
   latest?: {
     timestamp?: string;
     sourceIp?: string;
@@ -104,32 +128,92 @@ type ThreatRadarSuspect = {
     message?: string;
   };
   reasons: string[];
+  firstSeen?: string;
+  lastSeen?: string;
+  observations?: number;
+  previousEvents?: number;
+  eventDelta?: number;
+  active?: boolean;
+  gtiStatus?: GtiLookupStatus;
+  gtiMessage?: string;
+  gtiCached?: boolean;
   gti?: {
     verdict?: string;
     severity?: string;
     threatScore: number;
     malicious: number;
     suspicious: number;
+    harmless?: number;
+    undetected?: number;
+    totalEngines?: number;
     reputation: number;
     country?: string;
     asn: number;
     asOwner?: string;
   };
 };
+type ThreatRadarIndicator = {
+  value: string;
+  type: "domain" | "hash";
+  score: number;
+  severity: "critical" | "high" | "medium" | "low";
+  events: number;
+  infrastructureCount: number;
+  deniedEvents: number;
+  suspiciousKeywordHits: number;
+  matchedKeywords: string[];
+  signalCounts?: Record<string, number>;
+  actions: Array<{ key: string; count: number }>;
+  datasets: Array<{ key: string; count: number }>;
+  latest?: ThreatRadarSuspect["latest"];
+  reasons: string[];
+  gtiStatus?: GtiLookupStatus;
+  gtiMessage?: string;
+  gtiCached?: boolean;
+  gti?: ThreatRadarSuspect["gti"];
+};
 type ThreatRadarResponse = {
   from: string;
   to: string;
   analyzedAt: string;
+  eventsAnalyzed: number;
   suspects: ThreatRadarSuspect[];
   externalSources: ThreatRadarSuspect[];
   suspiciousDestinations: ThreatRadarSuspect[];
+  suspiciousOutbound: ThreatRadarSuspect[];
+  deniedActivity: ThreatRadarSuspect[];
+  reviewCandidates?: ThreatRadarSuspect[];
+  suspiciousIndicators: ThreatRadarIndicator[];
+  signals: Array<{ key: string; label: string; count: number }>;
   gtiEnabled: boolean;
+  analysis?: {
+    strategy: "single" | "staged";
+    partial: boolean;
+    completedStages: string[];
+    skippedStages: string[];
+    candidatesEvaluated?: number;
+    candidatesForReview?: number;
+    candidateMethods?: string[];
+    reputation?: {
+      status: "healthy" | "partial" | "unavailable" | "not_configured";
+      requested: number;
+      scored: number;
+      cached: number;
+      pending: number;
+      rateLimited: number;
+      failed: number;
+    };
+  };
   summary: {
     suspects: number;
     critical: number;
     high: number;
     medium: number;
   };
+};
+type PinnedThreatRadarAnalysis = {
+  range: RadarTimeRange;
+  report: ThreatRadarResponse;
 };
 type ThreatRadarAgentConfig = {
   enabled: boolean;
@@ -148,15 +232,63 @@ type ThreatRadarAgentState = {
   report?: ThreatRadarResponse;
 };
 type BridgeConfigResponse = {
+  extensionVersion?: string;
   threatFoxAuthKeySaved?: boolean;
   malwareBazaarAuthKeySaved?: boolean;
   googleThreatIntelApiKeySaved?: boolean;
   threatRadarAgent?: ThreatRadarAgentConfig;
   threatRadarAgentState?: ThreatRadarAgentState;
 };
+type AlertRule = {
+  id: string;
+  name: string;
+  indicatorType: "ip" | "domain" | "hash";
+  indicatorValue: string;
+  minScore: number;
+  enabled: boolean;
+  createdAt: string;
+};
+type AlertDelivery = {
+  browser: "sent" | "disabled" | "failed";
+  discord: "sent" | "disabled" | "failed";
+  telegram: "sent" | "disabled" | "failed";
+  errors: string[];
+};
+type AlertHistoryItem = {
+  id: string;
+  title: string;
+  category: string;
+  severity: "critical" | "high";
+  indicatorType: "ip" | "domain" | "hash";
+  indicator: string;
+  sourceIp?: string;
+  destinationIp?: string;
+  score: number;
+  events: number;
+  reasons: string[];
+  ruleNames: string[];
+  createdAt: string;
+  lastSeenAt: string;
+  lastNotifiedAt?: string;
+  occurrences: number;
+  delivery: AlertDelivery;
+};
+type AlertDashboardResponse = {
+  config: {
+    browserNotifications: boolean;
+    discordConfigured: boolean;
+    telegramConfigured: boolean;
+    cooldownMinutes: number;
+  };
+  rules: AlertRule[];
+  history: AlertHistoryItem[];
+};
 
-const DAILY_HUNT_LIMIT = 250;
+const DAILY_HUNT_BATCH_SIZE = 500;
+const SOC_WATCH_WEB_VERSION = "0.8.1";
 const THREAT_RADAR_LAYOUT_KEY = "socWatchThreatRadarLayout";
+const THREAT_RADAR_PINNED_ANALYSIS_KEY = "socWatchThreatRadarPinnedAnalysis";
+const IOC_HUNT_CURSOR_KEY = "socWatchIocHuntCursors";
 
 const nav: Array<{ label: Panel; icon: React.ComponentType<{ size?: number }> }> = [
   { label: "Dashboard", icon: Gauge },
@@ -176,6 +308,7 @@ function App() {
   const [active, setActive] = useState<Panel>("Dashboard");
   const [loading, setLoading] = useState(false);
   const [bridgeState, setBridgeState] = useState("Not checked");
+  const [extensionVersion, setExtensionVersion] = useState<string | null>(null);
   const [streamState, setStreamState] = useState("Disconnected");
   const [kibana, setKibana] = useState<KibanaStatus | null>(null);
   const [fleet, setFleet] = useState<FleetSummary | null>(null);
@@ -186,11 +319,14 @@ function App() {
   const [huntFilter, setHuntFilter] = useState<HuntFilter>("all");
   const [huntStatus, setHuntStatus] = useState<HuntStatus>("idle");
   const [huntProgress, setHuntProgress] = useState({ processed: 0, total: 0 });
+  const [huntBatchOffset, setHuntBatchOffset] = useState(() => loadIocHuntOffset("today"));
+  const [huntBatchInfo, setHuntBatchInfo] = useState<Pick<DailyHuntResponse, "batchNumber" | "batchOffset" | "batchSize" | "totalAvailable" | "nextBatchOffset" | "hasMore"> | null>(null);
   const [huntProviders, setHuntProviders] = useState<ProviderStatus[]>([]);
   const [huntResults, setHuntResults] = useState<HuntResult[]>([]);
-  const [radarTimeRange, setRadarTimeRange] = useState<RadarTimeRange>("last15m");
+  const [pinnedRadarAnalysis, setPinnedRadarAnalysis] = useState<PinnedThreatRadarAnalysis | null>(() => loadPinnedThreatRadarAnalysis());
+  const [radarTimeRange, setRadarTimeRange] = useState<RadarTimeRange>(() => pinnedRadarAnalysis?.range ?? "last15m");
   const [radarLoading, setRadarLoading] = useState(false);
-  const [radarResult, setRadarResult] = useState<ThreatRadarResponse | null>(null);
+  const [radarViewMode, setRadarViewMode] = useState<RadarViewMode>(() => pinnedRadarAnalysis ? "manual" : "automatic");
   const [indexPattern, setIndexPattern] = useState("logs-*");
   const [iocResult, setIocResult] = useState<unknown>(null);
   const [lastError, setLastError] = useState<string | null>(null);
@@ -217,7 +353,7 @@ function App() {
 
   useEffect(() => {
     startLiveBridge();
-    void loadBridgeConfig();
+    void loadBridgeConfig(false);
     return () => {
       if (retryTimerRef.current !== undefined) window.clearTimeout(retryTimerRef.current);
       streamRef.current?.disconnect();
@@ -226,8 +362,8 @@ function App() {
 
   useEffect(() => {
     if (active !== "Threat Radar") return;
-    void loadBridgeConfig();
-    const refresh = window.setInterval(() => void loadBridgeConfig(), 15000);
+    void loadBridgeConfig(true);
+    const refresh = window.setInterval(() => void loadBridgeConfig(true), 15000);
     return () => window.clearInterval(refresh);
   }, [active]);
 
@@ -306,16 +442,16 @@ function App() {
     startLiveBridge();
   }
 
-  async function loadBridgeConfig() {
-    const response = await sendBridgeMessage<unknown, BridgeConfigResponse>("config.get", {});
+  async function loadBridgeConfig(includeReport = false) {
+    const response = await sendBridgeMessage<{ includeReport: boolean }, BridgeConfigResponse>("config.get", { includeReport });
     if (response.success) {
+      setExtensionVersion(response.data.extensionVersion ?? null);
       setThreatFoxAuthKeySaved(Boolean(response.data.threatFoxAuthKeySaved));
       setMalwareBazaarAuthKeySaved(Boolean(response.data.malwareBazaarAuthKeySaved));
       setGoogleThreatIntelApiKeySaved(Boolean(response.data.googleThreatIntelApiKeySaved));
       if (response.data.threatRadarAgent) setThreatRadarAgent(response.data.threatRadarAgent);
       if (response.data.threatRadarAgentState) {
         setThreatRadarAgentState(response.data.threatRadarAgentState);
-        if (response.data.threatRadarAgentState.report) setRadarResult(response.data.threatRadarAgentState.report);
       }
     }
   }
@@ -341,7 +477,7 @@ function App() {
     setLoading(false);
   }
 
-  async function saveThreatRadarAgent(runNow = false) {
+  async function saveThreatRadarAgent(runNow = false, resetVisibleResults = false) {
     setSavingThreatRadarAgent(true);
     setLastError(null);
     const response = await sendBridgeMessage<ThreatRadarAgentConfig, { config: ThreatRadarAgentConfig; state: ThreatRadarAgentState }>("threatRadar.agent.configure", {
@@ -355,11 +491,19 @@ function App() {
     }
     setThreatRadarAgent(response.data.config);
     setThreatRadarAgentState(response.data.state);
+    if (resetVisibleResults) {
+      setPinnedRadarAnalysis(null);
+      clearPinnedThreatRadarAnalysis();
+      setRadarViewMode("automatic");
+      setHuntResults([]);
+      setHuntProviders([]);
+      setHuntBatchInfo(null);
+      setHuntStatus("idle");
+    }
     if (runNow && response.data.config.enabled) {
       const run = await sendBridgeMessage<unknown, { config: ThreatRadarAgentConfig; state: ThreatRadarAgentState }>("threatRadar.agent.run", {});
       if (run.success) {
         setThreatRadarAgentState(run.data.state);
-        if (run.data.state.report) setRadarResult(run.data.state.report);
       }
       else setLastError(run.error.message);
     }
@@ -433,10 +577,25 @@ function App() {
     setLoading(false);
   }
 
-  async function runIocHunt() {
+  function changeHuntTimeRange(value: HuntTimeRange) {
+    setHuntTimeRange(value);
+    setHuntBatchOffset(loadIocHuntOffset(value));
+    setHuntBatchInfo(null);
+    setHuntStatus("idle");
+    setHuntResults([]);
+    setHuntProviders([]);
+  }
+
+  async function runIocHunt(fresh = false) {
     const timeRange = huntTimeRangeToParams(huntTimeRange);
+    const batchOffset = fresh ? 0 : huntBatchInfo?.hasMore === false ? 0 : huntBatchOffset;
+    if (fresh) {
+      setHuntBatchOffset(0);
+      setHuntBatchInfo(null);
+      saveIocHuntOffset(huntTimeRange, 0);
+    }
     setHuntStatus("running");
-    setHuntProgress({ processed: 0, total: DAILY_HUNT_LIMIT });
+    setHuntProgress({ processed: 0, total: DAILY_HUNT_BATCH_SIZE });
     setHuntProviders([]);
     setHuntResults([]);
     setLastError(null);
@@ -447,12 +606,23 @@ function App() {
       from: timeRange.from,
       to: "now",
       size: 5,
-      maxIocs: DAILY_HUNT_LIMIT
+      maxIocs: DAILY_HUNT_BATCH_SIZE,
+      batchOffset
     });
 
     if (response.success) {
       setHuntProviders(response.data.providers);
       setHuntResults(response.data.results);
+      setHuntBatchInfo({
+        batchNumber: response.data.batchNumber,
+        batchOffset: response.data.batchOffset,
+        batchSize: response.data.batchSize,
+        totalAvailable: response.data.totalAvailable,
+        nextBatchOffset: response.data.nextBatchOffset,
+        hasMore: response.data.hasMore
+      });
+      setHuntBatchOffset(response.data.nextBatchOffset);
+      saveIocHuntOffset(huntTimeRange, response.data.nextBatchOffset >= response.data.totalAvailable ? 0 : response.data.nextBatchOffset);
       setHuntProgress({ processed: response.data.hunted, total: response.data.hunted });
     } else {
       setLastError(response.error.message);
@@ -474,12 +644,31 @@ function App() {
       size: 20
     });
     if (response.success) {
-      setRadarResult(response.data);
+      if (!hasThreatRadarCoreCoverage(response.data)) {
+        setLastError("Kibana did not complete either IP activity stage. The previous completed analysis remains pinned; retry Today or use Last 1 hour.");
+        setRadarLoading(false);
+        return;
+      }
+      const analysis = { range: radarTimeRange, report: response.data } satisfies PinnedThreatRadarAnalysis;
+      setPinnedRadarAnalysis(analysis);
+      savePinnedThreatRadarAnalysis(analysis);
+      setRadarViewMode("manual");
     } else {
-      setLastError(response.error.message);
+      setLastError(formatThreatRadarError(response.error.message, radarTimeRange));
     }
     setRadarLoading(false);
   }
+
+  function resumeAutomaticThreatRadar() {
+    setRadarViewMode("automatic");
+    setPinnedRadarAnalysis(null);
+    clearPinnedThreatRadarAnalysis();
+    void loadBridgeConfig(true);
+  }
+
+  const visibleRadarResult = radarViewMode === "manual" && pinnedRadarAnalysis
+    ? pinnedRadarAnalysis.report
+    : threatRadarAgentState.report ?? null;
 
   return (
     <main className="shell">
@@ -489,6 +678,7 @@ function App() {
           <div>
             <strong>SOC Watch</strong>
             <span>Bridge Console</span>
+            <small>Web v{SOC_WATCH_WEB_VERSION} | Bridge {extensionVersion ? `v${extensionVersion}` : "--"}</small>
           </div>
         </div>
         <nav>
@@ -525,10 +715,10 @@ function App() {
 
         {isThreatRadarView ? (
           <section className="status-strip radar-summary-strip" aria-label="Threat Radar finding summary">
-            <StatusTile label="Suspects" value={String(radarResult?.summary.suspects ?? 0)} tone={radarResult?.summary.suspects ? "critical" : "unknown"} />
-            <StatusTile label="Critical" value={String(radarResult?.summary.critical ?? 0)} tone={radarResult?.summary.critical ? "critical" : "unknown"} />
-            <StatusTile label="High" value={String(radarResult?.summary.high ?? 0)} tone={radarResult?.summary.high ? "critical" : "unknown"} />
-            <StatusTile label="Medium" value={String(radarResult?.summary.medium ?? 0)} tone={radarResult?.summary.medium ? "healthy" : "unknown"} />
+            <StatusTile label="Suspects" value={String(visibleRadarResult?.summary.suspects ?? 0)} tone={visibleRadarResult?.summary.suspects ? "critical" : "unknown"} />
+            <StatusTile label="Critical" value={String(visibleRadarResult?.summary.critical ?? 0)} tone={visibleRadarResult?.summary.critical ? "critical" : "unknown"} />
+            <StatusTile label="High" value={String(visibleRadarResult?.summary.high ?? 0)} tone={visibleRadarResult?.summary.high ? "critical" : "unknown"} />
+            <StatusTile label="Medium" value={String(visibleRadarResult?.summary.medium ?? 0)} tone={visibleRadarResult?.summary.medium ? "healthy" : "unknown"} />
           </section>
         ) : !hideIocHuntChrome ? (
           <>
@@ -582,6 +772,7 @@ function App() {
             savingThreatRadarAgent={savingThreatRadarAgent}
             onThreatRadarAgentChange={setThreatRadarAgent}
             onSaveThreatRadarAgent={() => void saveThreatRadarAgent(false)}
+            onSaveAllowlist={() => void saveThreatRadarAgent(false, true)}
             onRunThreatRadarAgent={() => void saveThreatRadarAgent(true)}
           />
         ) : null}
@@ -602,25 +793,32 @@ function App() {
             filter={huntFilter}
             status={huntStatus}
             progress={huntProgress}
+            batchInfo={huntBatchInfo}
             providers={huntProviders}
             results={huntResults}
-            onTimeRangeChange={setHuntTimeRange}
+            onTimeRangeChange={changeHuntTimeRange}
             onFilterChange={setHuntFilter}
-            onHunt={runIocHunt}
+            onHunt={() => void runIocHunt(false)}
+            onFreshHunt={() => void runIocHunt(true)}
           />
         ) : null}
         {active === "Threat Radar" ? (
           <ThreatRadar
             timeRange={radarTimeRange}
             loading={radarLoading}
-            result={radarResult}
+            result={visibleRadarResult}
             agentConfig={threatRadarAgent}
             agentState={threatRadarAgentState}
+            viewMode={radarViewMode}
+            pinnedRange={pinnedRadarAnalysis?.range ?? radarTimeRange}
+            error={lastError}
             onTimeRangeChange={setRadarTimeRange}
             onAnalyze={runThreatRadar}
+            onResumeAutomatic={resumeAutomaticThreatRadar}
           />
         ) : null}
-        {!["Dashboard", "Agents", "Settings", "IOC Search", "Infrastructure", "IOC Hunt", "Threat Radar"].includes(active) ? <Placeholder panel={active} /> : null}
+        {active === "Alerts" ? <AlertsPanel /> : null}
+        {!["Dashboard", "Agents", "Settings", "IOC Search", "Infrastructure", "IOC Hunt", "Threat Radar", "Alerts"].includes(active) ? <Placeholder panel={active} /> : null}
       </section>
     </main>
   );
@@ -829,6 +1027,7 @@ function SettingsPanel({
   savingThreatRadarAgent,
   onThreatRadarAgentChange,
   onSaveThreatRadarAgent,
+  onSaveAllowlist,
   onRunThreatRadarAgent
 }: {
   dataViews: DataViewSummary[];
@@ -853,15 +1052,45 @@ function SettingsPanel({
   savingThreatRadarAgent: boolean;
   onThreatRadarAgentChange: (value: ThreatRadarAgentConfig) => void;
   onSaveThreatRadarAgent: () => void;
+  onSaveAllowlist: () => void;
   onRunThreatRadarAgent: () => void;
 }) {
   const [settingsView, setSettingsView] = useState<SettingsView>("agent");
+  const [allowlistScope, setAllowlistScope] = useState<AllowlistScope>("ip");
+  const [allowlistValue, setAllowlistValue] = useState("");
+  const [allowlistError, setAllowlistError] = useState<string | null>(null);
+
+  function addAllowlistEntry(event: React.FormEvent) {
+    event.preventDefault();
+    const values = allowlistValue.split(/[\n,]+/).map((value) => value.trim()).filter(Boolean);
+    const entries = values.map((value) => normalizeAllowlistEntry(allowlistScope, value));
+    const invalidIndex = entries.findIndex((entry) => entry === null);
+    if (values.length === 0 || invalidIndex >= 0) {
+      setAllowlistError(values.length === 0 ? "Enter at least one value." : `Invalid ${allowlistScope}: ${values[invalidIndex]}`);
+      return;
+    }
+    onThreatRadarAgentChange({
+      ...threatRadarAgent,
+      candidateExclusions: [...new Set([...threatRadarAgent.candidateExclusions, ...(entries as string[])])]
+    });
+    setAllowlistValue("");
+    setAllowlistError(null);
+  }
+
+  function removeAllowlistEntry(entry: string) {
+    onThreatRadarAgentChange({
+      ...threatRadarAgent,
+      candidateExclusions: threatRadarAgent.candidateExclusions.filter((candidate) => candidate !== entry)
+    });
+  }
+
   return (
     <section className="grid">
       <div className="panel wide">
         <div className="settings-tabs" role="tablist" aria-label="Settings sections">
           {([
             ["agent", "Threat Radar Agent"],
+            ["allowlist", "Allowlist"],
             ["integrations", "Integrations"],
             ["dataViews", "Data Views"],
             ["connection", "Bridge Connection"]
@@ -949,19 +1178,65 @@ function SettingsPanel({
               <span>Run Scan Now</span>
             </button>
           </div>
-          <label className="field candidate-exclusions">
-            <span>Candidate exclusions</span>
-            <textarea
-              value={threatRadarAgent.candidateExclusions.join("\n")}
-              placeholder={"ip:10.0.0.0/8\nip:192.168.0.0/16\nkeyword:dhcp lease renewal\ndomain:trusted.example\nhash:0123456789abcdef"}
-              onChange={(event) => onThreatRadarAgentChange({
-                ...threatRadarAgent,
-                candidateExclusions: event.target.value.split("\n").map((value) => value.trim()).filter(Boolean)
-              })}
-            />
-          </label>
         </section>
         </> : null}
+        {settingsView === "allowlist" ? <section className="allowlist-settings" aria-labelledby="allowlist-title">
+          <div className="panel-actions">
+            <div>
+              <h2 id="allowlist-title">Detection Allowlist</h2>
+              <p className="muted">Trusted values are excluded from Threat Radar findings, investigation candidates, IOC Hunt matches, and automatic alerts.</p>
+            </div>
+            <Badge value={`${threatRadarAgent.candidateExclusions.length} entries`} />
+          </div>
+          <form className="allowlist-editor" onSubmit={addAllowlistEntry}>
+            <label className="field">
+              <span>Type</span>
+              <select value={allowlistScope} onChange={(event) => setAllowlistScope(event.target.value as AllowlistScope)}>
+                <option value="ip">IP or IPv4 CIDR</option>
+                <option value="domain">Domain</option>
+                <option value="hash">File hash</option>
+                <option value="keyword">Activity keyword</option>
+              </select>
+            </label>
+            <label className="field allowlist-value-field">
+              <span>Trusted value</span>
+              <input
+                value={allowlistValue}
+                onChange={(event) => setAllowlistValue(event.target.value)}
+                placeholder={allowlistPlaceholder(allowlistScope)}
+                autoComplete="off"
+              />
+            </label>
+            <button className="secondary align-end" type="submit">
+              <Plus size={16} aria-hidden="true" />
+              <span>Add</span>
+            </button>
+          </form>
+          {allowlistError ? <div className="field-error" role="alert">{allowlistError}</div> : null}
+          {threatRadarAgent.candidateExclusions.length > 0 ? (
+            <div className="table-wrap allowlist-table-wrap">
+              <table className="allowlist-table">
+                <thead><tr><th>Type</th><th>Value</th><th>Coverage</th><th>Remove</th></tr></thead>
+                <tbody>{threatRadarAgent.candidateExclusions.map((entry) => {
+                  const parsed = parseAllowlistEntry(entry);
+                  return <tr key={entry}>
+                    <td><Badge value={parsed.scope.toUpperCase()} /></td>
+                    <td className="mono-cell">{parsed.value}</td>
+                    <td>Threat Radar and IOC Hunt</td>
+                    <td><button className="icon-button danger-button" type="button" aria-label={`Remove ${parsed.value} from allowlist`} onClick={() => removeAllowlistEntry(entry)}><Trash2 size={16} aria-hidden="true" /></button></td>
+                  </tr>;
+                })}</tbody>
+              </table>
+            </div>
+          ) : <div className="empty-card"><strong>No trusted values configured.</strong><span>All candidates are currently evaluated.</span></div>}
+          <div className="settings-action-row allowlist-save-row">
+            <span className="muted">Saved entries take effect immediately; explicit IOC Search remains available for analyst investigation.</span>
+            <button className="primary" type="button" onClick={onSaveAllowlist} disabled={savingThreatRadarAgent}>
+              <ShieldCheck size={16} aria-hidden="true" />
+              <span>{savingThreatRadarAgent ? "Saving" : "Save Allowlist"}</span>
+            </button>
+          </div>
+        </section> : null}
         {settingsView === "dataViews" ? <>
         <div className="panel-actions">
           <h2>Data Views</h2>
@@ -1027,9 +1302,43 @@ function formatThreatRadarAgentState(state: ThreatRadarAgentState): string {
   if (state.status === "running") return "Scan in progress. The agent is querying the configured SIEM index now.";
   if (state.completedAt) {
     const scoredFlows = state.report?.summary.suspects ?? 0;
-    return `Healthy. Last scan completed ${new Date(state.completedAt).toLocaleString()}; it returned ${scoredFlows} scored public flows, and ${state.candidates ?? 0} met the automatic alert criteria.`;
+    const analyzedEvents = state.report?.eventsAnalyzed ?? 0;
+    return `Last scan completed ${new Date(state.completedAt).toLocaleString()}; ${analyzedEvents.toLocaleString()} events were analyzed, ${scoredFlows} findings were promoted, and ${state.candidates ?? 0} met the automatic alert criteria.`;
   }
   return "No scheduled scan has completed yet.";
+}
+
+function normalizeAllowlistEntry(scope: AllowlistScope, rawValue: string): string | null {
+  const value = rawValue.trim().toLowerCase();
+  if (!value || value.length > 240) return null;
+  if (scope === "ip") {
+    const [address, prefix] = value.split("/");
+    const ipv4Parts = address?.split(".").map(Number) ?? [];
+    const validIpv4 = ipv4Parts.length === 4 && ipv4Parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 255);
+    const validIpv4Prefix = prefix === undefined || (/^\d{1,2}$/.test(prefix) && Number(prefix) >= 0 && Number(prefix) <= 32);
+    const validIpv6 = prefix === undefined && /^[0-9a-f:]+$/.test(address ?? "") && (address?.includes(":") ?? false);
+    if (!(validIpv4 && validIpv4Prefix) && !validIpv6) return null;
+  }
+  if (scope === "domain" && !/^(?=.{1,253}$)(?!-)(?:[a-z0-9-]{1,63}\.)+[a-z]{2,63}$/.test(value)) return null;
+  if (scope === "hash" && !/^(?:[a-f0-9]{32}|[a-f0-9]{40}|[a-f0-9]{64})$/.test(value)) return null;
+  if (scope === "keyword" && value.length < 3) return null;
+  return `${scope}:${value}`;
+}
+
+function parseAllowlistEntry(entry: string): { scope: AllowlistScope | "value"; value: string } {
+  const separator = entry.indexOf(":");
+  const scope = entry.slice(0, separator) as AllowlistScope;
+  if (separator > 0 && ["ip", "domain", "hash", "keyword"].includes(scope)) {
+    return { scope, value: entry.slice(separator + 1) };
+  }
+  return { scope: "value", value: entry };
+}
+
+function allowlistPlaceholder(scope: AllowlistScope): string {
+  if (scope === "ip") return "198.51.100.25 or 198.51.100.0/24";
+  if (scope === "domain") return "trusted.example";
+  if (scope === "hash") return "MD5, SHA-1, or SHA-256";
+  return "approved scanner name";
 }
 
 function IOCSearch({
@@ -1115,27 +1424,31 @@ function IOCHunt({
   filter,
   status,
   progress,
+  batchInfo,
   providers,
   results,
   onTimeRangeChange,
   onFilterChange,
-  onHunt
+  onHunt,
+  onFreshHunt
 }: {
   timeRange: HuntTimeRange;
   filter: HuntFilter;
   status: HuntStatus;
   progress: { processed: number; total: number };
+  batchInfo: Pick<DailyHuntResponse, "batchNumber" | "batchOffset" | "batchSize" | "totalAvailable" | "nextBatchOffset" | "hasMore"> | null;
   providers: ProviderStatus[];
   results: HuntResult[];
   onTimeRangeChange: (value: HuntTimeRange) => void;
   onFilterChange: (value: HuntFilter) => void;
   onHunt: () => void;
+  onFreshHunt: () => void;
 }) {
-  const stagedProgress = useAnimatedHuntStages(status, progress.total || DAILY_HUNT_LIMIT);
+  const stagedProgress = useAnimatedHuntStages(status, progress.total || DAILY_HUNT_BATCH_SIZE);
   const matched = results.filter((result) => result.total > 0);
   const filteredMatches = matched.filter((result) => matchesHuntFilter(result.ioc.type, filter));
   const first = matched[0]?.ioc ?? results[0]?.ioc;
-  const collected = providers.reduce((sum, provider) => sum + provider.collected, 0);
+  const collected = batchInfo?.totalAvailable ?? providers.reduce((sum, provider) => sum + provider.collected, 0);
   const checked = providers.reduce((sum, provider) => sum + (provider.checked ?? 0), 0);
   const healthySources = providers.filter((provider) => provider.status === "healthy").length;
   const typeStats = buildHuntTypeStats(results);
@@ -1171,13 +1484,11 @@ function IOCHunt({
           <h2>IOC Hunt in progress</h2>
           <p>Scanning threat-intel feeds, normalizing indicators, and checking Elastic for internal matches.</p>
           <div className="hunt-stage-grid">
-            <StageCard label="Vendor feeds" current={stagedProgress.vendors} total={progress.total || DAILY_HUNT_LIMIT} />
-            <StageCard label="Normalization" current={stagedProgress.normalized} total={progress.total || DAILY_HUNT_LIMIT} />
-            <StageCard label="SIEM checks" current={stagedProgress.checked} total={progress.total || DAILY_HUNT_LIMIT} />
+            <StageCard label="Vendor feeds" current={stagedProgress.vendors} total={progress.total || DAILY_HUNT_BATCH_SIZE} />
+            <StageCard label="Normalization" current={stagedProgress.normalized} total={progress.total || DAILY_HUNT_BATCH_SIZE} />
+            <StageCard label="SIEM checks" current={stagedProgress.checked} total={progress.total || DAILY_HUNT_BATCH_SIZE} />
           </div>
-          {stagedProgress.checked >= (progress.total || DAILY_HUNT_LIMIT) ? (
-            <p className="scope-finalizing">250 checks reached. Finalizing the Elastic response...</p>
-          ) : null}
+          <p className="scope-finalizing">Checking this {progress.total || DAILY_HUNT_BATCH_SIZE}-indicator batch in Elastic...</p>
         </div>
       </section>
     );
@@ -1190,12 +1501,22 @@ function IOCHunt({
           <div>
             <h2>IOC Hunt</h2>
             <p className="muted compact-copy">Showing SIEM matches only. Feed collection and checked coverage are below.</p>
+            {batchInfo ? (
+              <p className="hunt-batch-summary">
+                Batch {batchInfo.batchNumber}: indicators {batchInfo.batchOffset + 1}-{batchInfo.batchOffset + batchInfo.batchSize} of {batchInfo.totalAvailable} checked
+                {batchInfo.hasMore ? " | Run Again checks the next batch" : " | All collected batches checked"}
+              </p>
+            ) : null}
           </div>
           <div className="top-actions">
             <TimeRangePicker value={timeRange} onChange={onTimeRangeChange} />
+            <button className="secondary large-action" onClick={onFreshHunt}>
+              <RefreshCw size={18} aria-hidden="true" />
+              <span>Fresh Scan</span>
+            </button>
             <button className="primary large-action" onClick={onHunt}>
               <Play size={18} aria-hidden="true" />
-              <span>Run Again</span>
+              <span>{batchInfo?.hasMore === false ? "Restart Batches" : "Run Again"}</span>
             </button>
           </div>
         </div>
@@ -1236,16 +1557,24 @@ function ThreatRadar({
   result,
   agentConfig,
   agentState,
+  viewMode,
+  pinnedRange,
+  error,
   onTimeRangeChange,
-  onAnalyze
+  onAnalyze,
+  onResumeAutomatic
 }: {
   timeRange: RadarTimeRange;
   loading: boolean;
   result: ThreatRadarResponse | null;
   agentConfig: ThreatRadarAgentConfig;
   agentState: ThreatRadarAgentState;
+  viewMode: RadarViewMode;
+  pinnedRange: RadarTimeRange;
+  error: string | null;
   onTimeRangeChange: (value: RadarTimeRange) => void;
   onAnalyze: () => void;
+  onResumeAutomatic: () => void;
 }) {
   const [editingLayout, setEditingLayout] = useState(false);
   const [layout, setLayout] = useState<RadarLayoutItem[]>(() => resolveRadarCollisions(loadThreatRadarLayout()));
@@ -1261,9 +1590,12 @@ function ThreatRadar({
     x: number;
     y: number;
   } | null>(null);
-  const [sourceSort, setSourceSort] = useState<RadarSort>("score-desc");
-  const [destinationSort, setDestinationSort] = useState<RadarSort>("score-desc");
-  const [portSort, setPortSort] = useState<RadarSort>("score-desc");
+  const [sourceSort, setSourceSort] = useState<RadarSort>({ field: "gti", direction: "desc" });
+  const [destinationSort, setDestinationSort] = useState<RadarSort>({ field: "gti", direction: "desc" });
+  const [outboundSort, setOutboundSort] = useState<RadarSort>({ field: "gti", direction: "desc" });
+  const [deniedSort, setDeniedSort] = useState<RadarSort>({ field: "denied", direction: "desc" });
+  const [portSort, setPortSort] = useState<RadarSort>({ field: "gti", direction: "desc" });
+  const [reviewSort, setReviewSort] = useState<RadarSort>({ field: "score", direction: "desc" });
   const layoutCanvasRef = useRef<HTMLDivElement | null>(null);
   const cardDragRef = useRef<{
     id: RadarCardId;
@@ -1278,11 +1610,18 @@ function ThreatRadar({
   const activeCardDragRef = useRef<typeof activeCardDrag>(null);
   const sourceSuspects = sortRadarSuspects(result?.externalSources ?? [], sourceSort);
   const destinationSuspects = sortRadarSuspects(result?.suspiciousDestinations ?? [], destinationSort);
-  const suspects = result?.suspects ?? [];
-  const portSuspects = sortRadarSuspects(suspects.filter((suspect) => suspect.dangerousPorts.length > 0), portSort);
+  const outboundSuspects = sortRadarSuspects(result?.suspiciousOutbound ?? [], outboundSort);
+  const deniedSuspects = sortRadarSuspects(result?.deniedActivity ?? [], deniedSort);
+  const reviewCandidates = sortRadarSuspects(result?.reviewCandidates ?? [], reviewSort);
+  const portSuspects = sortRadarSuspects(
+    (result?.externalSources ?? []).filter((suspect) => suspect.dangerousPorts.length > 0),
+    portSort
+  );
+  const suspiciousIndicators = result?.suspiciousIndicators ?? [];
   const usesSavedCanvas = layout.every((item) => typeof item.x === "number" && typeof item.y === "number");
   const canvasPositioning = editingLayout || usesSavedCanvas;
-  const agentIsScanning = loading || agentState.status === "running";
+  const agentIsScanning = agentState.status === "running";
+  const showingManualAnalysis = viewMode === "manual";
 
   function beginLayoutEdit() {
     const canvas = layoutCanvasRef.current?.getBoundingClientRect();
@@ -1435,6 +1774,25 @@ function ThreatRadar({
     window.addEventListener("pointercancel", onUp);
   }
 
+  function handleCardLayoutKey(event: React.KeyboardEvent<HTMLDivElement>, item: RadarLayoutItem) {
+    if (!editingLayout || !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+    event.preventDefault();
+    const amount = event.altKey ? 1 : 16;
+    const defaults = defaultRadarCardSize(item.id);
+    if (event.shiftKey) {
+      const widthDelta = event.key === "ArrowRight" ? amount : event.key === "ArrowLeft" ? -amount : 0;
+      const heightDelta = event.key === "ArrowDown" ? amount : event.key === "ArrowUp" ? -amount : 0;
+      updateCardLayout(item.id, {
+        width: clamp((item.width ?? defaults.width) + widthDelta, 360, 1400),
+        height: clamp((item.height ?? defaults.height) + heightDelta, 260, 1000)
+      });
+      return;
+    }
+    const nextX = Math.max(0, (item.x ?? 0) + (event.key === "ArrowRight" ? amount : event.key === "ArrowLeft" ? -amount : 0));
+    const nextY = Math.max(0, (item.y ?? 0) + (event.key === "ArrowDown" ? amount : event.key === "ArrowUp" ? -amount : 0));
+    placeCard(item.id, nextX, nextY);
+  }
+
   function renderCard(item: RadarLayoutItem, floating = false) {
     const defaults = defaultRadarCardSize(item.id);
     const width = item.width ?? defaults.width;
@@ -1466,6 +1824,9 @@ function ThreatRadar({
       draggable: false,
       onDragStart: startCardDrag,
       onPointerDown: floating ? undefined : (event) => startCardPointerDrag(event, item.id),
+      onKeyDown: floating ? undefined : (event) => handleCardLayoutKey(event, item),
+      tabIndex: editingLayout && !floating ? 0 : undefined,
+      "aria-label": editingLayout ? `${item.id} card. Use arrow keys to move; Shift and arrow keys to resize.` : undefined,
       className: `panel radar-widget ${floating ? "dragging floating" : ""}`
     };
 
@@ -1476,11 +1837,10 @@ function ThreatRadar({
           <div className="ranked-card-head">
             <div>
               <h3>Suspicious Source Flows</h3>
-              <span>Ranked by source IP behavior across all monitored events</span>
+              <span>Public sources with corroborated hostile behavior</span>
             </div>
-            <RadarSortSelect value={sourceSort} onChange={setSourceSort} />
           </div>
-          <ThreatRadarList suspects={sourceSuspects} mode="source" />
+          <ThreatRadarList suspects={sourceSuspects} mode="source" sort={sourceSort} onSort={setSourceSort} />
         </div>
       );
     }
@@ -1492,11 +1852,70 @@ function ThreatRadar({
           <div className="ranked-card-head">
             <div>
               <h3>Suspicious Destination Flows</h3>
-              <span>Ranked by destination IP behavior across all monitored events</span>
+              <span>Public destinations with corroborated reputation or behavior risk</span>
             </div>
-            <RadarSortSelect value={destinationSort} onChange={setDestinationSort} />
           </div>
-          <ThreatRadarList suspects={destinationSuspects} mode="destination" />
+          <ThreatRadarList suspects={destinationSuspects} mode="destination" sort={destinationSort} onSort={setDestinationSort} />
+        </div>
+      );
+    }
+
+    if (item.id === "outbound") {
+      return (
+        <div key={item.id} data-radar-card={item.id} style={style} {...cardProps}>
+          {editHandles}
+          <div className="ranked-card-head">
+            <div>
+              <h3>Suspicious Outbound Activity</h3>
+              <span>Internal sources communicating with public destinations</span>
+            </div>
+          </div>
+          <ThreatRadarList suspects={outboundSuspects} mode="outbound" sort={outboundSort} onSort={setOutboundSort} />
+        </div>
+      );
+    }
+
+    if (item.id === "denied") {
+      return (
+        <div key={item.id} data-radar-card={item.id} style={style} {...cardProps}>
+          {editHandles}
+          <div className="ranked-card-head">
+            <div>
+              <h3>Denied and Failed Activity</h3>
+              <span>Public inbound sources ranked by rejected attack volume</span>
+            </div>
+          </div>
+          <ThreatRadarList suspects={deniedSuspects} mode="denied" sort={deniedSort} onSort={setDeniedSort} />
+        </div>
+      );
+    }
+
+    if (item.id === "indicators") {
+      return (
+        <div key={item.id} data-radar-card={item.id} style={style} {...cardProps}>
+          {editHandles}
+          <div className="ranked-card-head">
+            <div>
+              <h3>Suspicious Domains and Hashes</h3>
+              <span>Reputation-prioritized indicators with behavioral evidence</span>
+            </div>
+          </div>
+          <ThreatIndicatorList indicators={suspiciousIndicators} />
+        </div>
+      );
+    }
+
+    if (item.id === "review") {
+      return (
+        <div key={item.id} data-radar-card={item.id} style={style} {...cardProps}>
+          {editHandles}
+          <div className="ranked-card-head">
+            <div>
+              <h3>Investigation Queue</h3>
+              <span>Corroborated anomalies below the automatic-alert threshold</span>
+            </div>
+          </div>
+          <ThreatRadarList suspects={reviewCandidates} mode="review" sort={reviewSort} onSort={setReviewSort} />
         </div>
       );
     }
@@ -1507,11 +1926,10 @@ function ThreatRadar({
         <div className="ranked-card-head">
           <div>
             <h3>Suspicious Port Activity</h3>
-            <span>Risky services targeted across your infrastructure</span>
+            <span>Public sources targeting risky services across infrastructure</span>
           </div>
-          <RadarSortSelect value={portSort} onChange={setPortSort} />
         </div>
-        <ThreatRadarList suspects={portSuspects} mode="ports" />
+        <ThreatRadarList suspects={portSuspects} mode="ports" sort={portSort} onSort={setPortSort} />
       </div>
     );
   }
@@ -1522,12 +1940,31 @@ function ThreatRadar({
         <div>
           <div className="panel-title">
             <Activity size={18} aria-hidden="true" className={agentConfig.enabled ? "agent-heartbeat" : ""} />
-            <h2>{agentConfig.enabled ? agentIsScanning ? "Agent scan in progress" : "Agent monitoring active" : "Agent monitoring paused"}</h2>
+            <h2>{showingManualAnalysis
+              ? `${formatRadarRangeLabel(pinnedRange ?? timeRange)} analysis pinned`
+              : agentConfig.enabled
+                ? agentIsScanning ? "Agent scan in progress" : "Agent monitoring active"
+                : "Agent monitoring paused"}</h2>
           </div>
-          <p className="muted">Scanning <strong>{agentConfig.indexPattern}</strong> every {agentConfig.intervalMinutes} minutes across source, destination, client, and server IP activity for risky ports, failed authentication, high-volume bursts, and scan patterns.</p>
+          <p className="muted">{showingManualAnalysis
+            ? agentConfig.enabled
+              ? `Showing the completed ${formatRadarRangeLabel(pinnedRange ?? timeRange).toLowerCase()} analysis. Automatic monitoring continues every ${agentConfig.intervalMinutes} minutes in the background and will not replace these findings.`
+              : `Showing the completed ${formatRadarRangeLabel(pinnedRange ?? timeRange).toLowerCase()} analysis. Automatic monitoring is currently paused in Settings.`
+            : <>Scanning <strong>{agentConfig.indexPattern}</strong> every {agentConfig.intervalMinutes} minutes across threat signals, denied activity, risky authentication, exposed services, and traffic behavior. Public inbound threats require corroborated evidence; private hosts are evaluated only for suspicious outbound communication. Findings remain visible in a rolling 24-hour history.</>}</p>
+          <p className="radar-run-summary">
+            {result
+              ? `${result.eventsAnalyzed.toLocaleString()} events analyzed | ${(result.analysis?.candidatesEvaluated ?? result.summary.suspects).toLocaleString()} evidence candidates evaluated | ${result.summary.suspects.toLocaleString()} promoted findings | ${(result.analysis?.candidatesForReview ?? result.reviewCandidates?.length ?? 0).toLocaleString()} queued for review | ${result.signals.length.toLocaleString()} active signal families`
+              : "No completed analysis is available yet."}
+          </p>
         </div>
         <div className="top-actions">
           <ThreatRadarRangePicker value={timeRange} onChange={onTimeRangeChange} />
+          {showingManualAnalysis ? (
+            <button className="secondary" onClick={onResumeAutomatic} disabled={loading} title="Return to findings from the scheduled monitoring agent">
+              <Activity size={16} aria-hidden="true" />
+              <span>Run Automatically</span>
+            </button>
+          ) : null}
           <button className="secondary" onClick={editingLayout ? saveLayout : beginLayoutEdit}>
             <Settings size={16} aria-hidden="true" />
             <span>{editingLayout ? "Save Layout" : "Edit Layout"}</span>
@@ -1538,6 +1975,38 @@ function ThreatRadar({
           </button>
         </div>
       </div>
+
+      {error ? (
+        <div className="notice wide radar-error" role="alert">
+          <AlertTriangle size={18} aria-hidden="true" />
+          <div>
+            <strong>Threat Radar scan did not complete</strong>
+            <span>{error}</span>
+          </div>
+        </div>
+      ) : null}
+
+      {result?.analysis?.partial ? (
+        <div className="notice wide radar-coverage-warning" role="status">
+          <AlertTriangle size={18} aria-hidden="true" />
+          <div>
+            <strong>Analysis completed with reduced coverage</strong>
+            <span>Unavailable stages: {result.analysis.skippedStages.join(", ")}. The findings shown are valid, but some activity categories may be missing.</span>
+          </div>
+        </div>
+      ) : null}
+
+      {result?.analysis?.reputation && result.analysis.reputation.requested > 0 && result.analysis.reputation.status !== "healthy" ? (
+        <div className="notice wide radar-coverage-warning" role="status">
+          <AlertTriangle size={18} aria-hidden="true" />
+          <div>
+            <strong>Reputation coverage is {result.analysis.reputation.status === "not_configured" ? "not configured" : "still in progress"}</strong>
+            <span>{formatReputationCoverage(result.analysis.reputation)}</span>
+          </div>
+        </div>
+      ) : null}
+
+      <DetectionSignalDashboard result={result} />
 
       <div
         ref={layoutCanvasRef}
@@ -1591,20 +2060,17 @@ function RadarResizeHandles({ onResize }: { onResize: (event: React.PointerEvent
   );
 }
 
-function RadarSortSelect({ value, onChange }: { value: RadarSort; onChange: (value: RadarSort) => void }) {
-  return (
-    <select className="sort-select" value={value} onChange={(event) => onChange(event.target.value as RadarSort)} aria-label="Sort radar card">
-      <option value="score-desc">Score high-low</option>
-      <option value="score-asc">Score low-high</option>
-      <option value="events-desc">Events high-low</option>
-      <option value="events-asc">Events low-high</option>
-      <option value="ip-asc">IP A-Z</option>
-      <option value="ip-desc">IP Z-A</option>
-    </select>
-  );
-}
-
-function ThreatRadarList({ suspects, mode }: { suspects: ThreatRadarSuspect[]; mode: "source" | "destination" | "ports" }) {
+function ThreatRadarList({
+  suspects,
+  mode,
+  sort,
+  onSort
+}: {
+  suspects: ThreatRadarSuspect[];
+  mode: "source" | "destination" | "outbound" | "denied" | "ports" | "review";
+  sort: RadarSort;
+  onSort: (sort: RadarSort) => void;
+}) {
   const pageSize = 10;
   const [page, setPage] = useState(1);
   const pageCount = Math.max(1, Math.ceil(suspects.length / pageSize));
@@ -1616,21 +2082,34 @@ function ThreatRadarList({ suspects, mode }: { suspects: ThreatRadarSuspect[]; m
     setPage((current) => Math.min(current, pageCount));
   }, [pageCount]);
 
-  if (suspects.length === 0) return <EmptyRadarState />;
+  if (suspects.length === 0) {
+    const emptyTitles: Record<typeof mode, string> = {
+      source: "No source IP met the malicious-intent evidence threshold.",
+      destination: "No suspicious destination IP met the evidence threshold.",
+      outbound: "No private host communicating with a risky public destination was detected.",
+      denied: "No denied or failed activity met the attack threshold.",
+      ports: "No risky-port activity met the evidence threshold.",
+      review: "No additional IP has enough independent evidence for analyst review."
+    };
+    return <EmptyRadarState title={emptyTitles[mode]} />;
+  }
   return (
     <div className="radar-list">
       <div className="mini-table-wrap radar-table-wrap">
         <table className="mini-ioc-table radar-table">
           <thead>
             <tr>
-              <th>Source IP</th>
-              <th>Destination IP</th>
-              <th>Score</th>
-              <th>GTI</th>
-              <th>Events</th>
-              <th>Infrastructure</th>
-              <th>Ports</th>
-              <th>Reasons</th>
+              <SortableRadarHeader label="Source IP" field="sourceIp" sort={sort} onSort={onSort} />
+              <SortableRadarHeader label="Destination IP" field="destinationIp" sort={sort} onSort={onSort} />
+              <SortableRadarHeader label="Score" field="score" sort={sort} onSort={onSort} />
+              <SortableRadarHeader label="Reputation" field="gti" sort={sort} onSort={onSort} />
+              <SortableRadarHeader label="Events" field="events" sort={sort} onSort={onSort} />
+              <SortableRadarHeader label="Denied" field="denied" sort={sort} onSort={onSort} />
+              <SortableRadarHeader label="Outbound" field="outbound" sort={sort} onSort={onSort} />
+              <SortableRadarHeader label="Infrastructure" field="infrastructure" sort={sort} onSort={onSort} />
+              <SortableRadarHeader label="Ports" field="ports" sort={sort} onSort={onSort} />
+              <SortableRadarHeader label="History" field="history" sort={sort} onSort={onSort} />
+              <SortableRadarHeader label="Reasons" field="reasons" sort={sort} onSort={onSort} />
             </tr>
           </thead>
           <tbody>
@@ -1639,10 +2118,13 @@ function ThreatRadarList({ suspects, mode }: { suspects: ThreatRadarSuspect[]; m
                 <td className="mono-cell">{suspect.sourceIp}</td>
                 <td className="mono-cell">{suspect.destinationIp}</td>
                 <td><Badge value={`${suspect.score}`} /></td>
-                <td>{suspect.gti?.threatScore ?? "--"}</td>
+                <td><ReputationCell gti={suspect.gti} target={suspect.gtiIp} status={suspect.gtiStatus} message={suspect.gtiMessage} cached={suspect.gtiCached} /></td>
                 <td>{suspect.events}</td>
+                <td>{suspect.deniedEvents ?? 0}</td>
+                <td>{suspect.outboundEvents ?? 0}</td>
                 <td>{suspect.infrastructureCount}</td>
                 <td>{suspect.topPorts.length ? suspect.topPorts.join(", ") : "--"}</td>
+                <td><FindingHistoryCell suspect={suspect} /></td>
                 <td>{suspect.reasons.slice(0, 3).join(" | ")}</td>
               </tr>
             ))}
@@ -1654,13 +2136,381 @@ function ThreatRadarList({ suspects, mode }: { suspects: ThreatRadarSuspect[]; m
   );
 }
 
-function RadarPagination({ page, pageCount, total, pageSize, onChange }: { page: number; pageCount: number; total: number; pageSize: number; onChange: (page: number) => void }) {
+function SortableRadarHeader({
+  label,
+  field,
+  sort,
+  onSort
+}: {
+  label: string;
+  field: RadarSortField;
+  sort: RadarSort;
+  onSort: (sort: RadarSort) => void;
+}) {
+  const active = sort.field === field;
+  const Icon = active ? sort.direction === "asc" ? ArrowUp : ArrowDown : ArrowUpDown;
+  return (
+    <th aria-sort={active ? sort.direction === "asc" ? "ascending" : "descending" : "none"}>
+      <button
+        className={`sortable-table-head ${active ? "active" : ""}`}
+        onClick={() => onSort({ field, direction: active && sort.direction === "asc" ? "desc" : "asc" })}
+        aria-label={`Sort by ${label} ${active && sort.direction === "asc" ? "descending" : "ascending"}`}
+      >
+        <span>{label}</span>
+        <Icon size={13} aria-hidden="true" />
+      </button>
+    </th>
+  );
+}
+
+function FindingHistoryCell({ suspect }: { suspect: ThreatRadarSuspect }) {
+  const observations = suspect.observations ?? 1;
+  const delta = suspect.eventDelta;
+  const trend = delta === undefined ? suspect.active === false ? "Quiet" : "New" : delta > 0 ? `+${delta}` : String(delta);
+  const trendClass = delta === undefined ? "neutral" : delta > 0 ? "up" : delta < 0 ? "down" : "neutral";
+  return (
+    <div className="finding-history">
+      <strong className={trendClass}>{trend}</strong>
+      <span>{observations} scan{observations === 1 ? "" : "s"}</span>
+      <span>{suspect.lastSeen ? formatRelativeTime(suspect.lastSeen) : "Current scan"}</span>
+    </div>
+  );
+}
+
+function ThreatIndicatorList({ indicators }: { indicators: ThreatRadarIndicator[] }) {
+  const pageSize = 10;
+  const [page, setPage] = useState(1);
+  const pageCount = Math.max(1, Math.ceil(indicators.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
+  const pageStart = (currentPage - 1) * pageSize;
+  const visibleIndicators = indicators.slice(pageStart, pageStart + pageSize);
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, pageCount));
+  }, [pageCount]);
+
+  if (indicators.length === 0) return <EmptyRadarState title="No suspicious domains or hashes scored yet." />;
+  return (
+    <div className="radar-list">
+      <div className="mini-table-wrap radar-table-wrap">
+        <table className="mini-ioc-table radar-table indicator-table">
+          <thead>
+            <tr>
+              <th>Type</th>
+              <th>Indicator</th>
+              <th>Score</th>
+              <th>Reputation</th>
+              <th>Events</th>
+              <th>Denied</th>
+              <th>Infrastructure</th>
+              <th>Signals</th>
+              <th>Reasons</th>
+            </tr>
+          </thead>
+          <tbody>
+            {visibleIndicators.map((indicator) => (
+              <tr key={`${indicator.type}:${indicator.value}`}>
+                <td><Badge value={indicator.type.toUpperCase()} /></td>
+                <td className="mono-cell indicator-value">{indicator.value}</td>
+                <td><Badge value={`${indicator.score}`} /></td>
+                <td><ReputationCell gti={indicator.gti} target={indicator.value} status={indicator.gtiStatus} message={indicator.gtiMessage} cached={indicator.gtiCached} /></td>
+                <td>{indicator.events}</td>
+                <td>{indicator.deniedEvents}</td>
+                <td>{indicator.infrastructureCount}</td>
+                <td>{indicator.matchedKeywords.length ? indicator.matchedKeywords.map(formatRadarSignal).join(", ") : "--"}</td>
+                <td>{indicator.reasons.slice(0, 3).join(" | ")}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <RadarPagination page={currentPage} pageCount={pageCount} total={indicators.length} pageSize={pageSize} onChange={setPage} />
+    </div>
+  );
+}
+
+type ThreatSignalDetail = {
+  id: string;
+  entity: string;
+  sourceIp: string;
+  destinationIp: string;
+  events: number;
+  actions: Array<{ key: string; count: number }>;
+  infrastructureCount: number;
+  ports: number[];
+  score: number;
+  gti: ThreatRadarSuspect["gti"] | undefined;
+  gtiTarget: string;
+  evidence: string[];
+};
+
+function DetectionSignalDashboard({ result }: { result: ThreatRadarResponse | null }) {
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const signals = useMemo(() => buildDetectionSignalSummaries(result), [result]);
+  const selectedSignal = signals.find((signal) => signal.key === selectedKey);
+  const details = useMemo(
+    () => selectedKey && result ? getThreatSignalDetails(result, selectedKey) : [],
+    [result, selectedKey]
+  );
+  const pageSize = 10;
+  const pageCount = Math.max(1, Math.ceil(details.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
+  const visibleDetails = details.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+
+  useEffect(() => {
+    setPage(1);
+  }, [selectedKey]);
+
+  useEffect(() => {
+    if (selectedKey && !selectedSignal) setSelectedKey(null);
+  }, [selectedKey, selectedSignal]);
+
+  useEffect(() => {
+    if (!selectedKey) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [selectedKey]);
+
+  function closeDialog() {
+    setSelectedKey(null);
+    window.requestAnimationFrame(() => triggerRef.current?.focus());
+  }
+
+  function handleDialogKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeDialog();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>(
+      "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])"
+    ) ?? []);
+    if (focusable.length === 0) return;
+    const first = focusable[0]!;
+    const last = focusable[focusable.length - 1]!;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  return (
+    <>
+      <section className="panel wide signal-dashboard" aria-labelledby="detection-signals-title">
+        <div className="signal-dashboard-head">
+          <div>
+            <h2 id="detection-signals-title">Detection Signals</h2>
+            <span>Evidence-backed activity families. Open a signal to inspect every associated finding.</span>
+          </div>
+          <strong>{signals.length} active</strong>
+        </div>
+        {signals.length === 0 ? (
+          <div className="signal-dashboard-empty">No corroborated detection signals in the current result.</div>
+        ) : (
+          <div className="signal-dashboard-grid">
+            {signals.map((signal) => (
+              <button
+                key={signal.key}
+                type="button"
+                className="signal-summary-button"
+                aria-haspopup="dialog"
+                onClick={(event) => {
+                  triggerRef.current = event.currentTarget;
+                  setSelectedKey(signal.key);
+                }}
+              >
+                <span>{signal.label}</span>
+                <span className="signal-summary-count">{signal.count}</span>
+                <ChevronRight size={18} aria-hidden="true" />
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {selectedSignal ? (
+        <div className="signal-modal-backdrop" onMouseDown={closeDialog}>
+          <div
+            ref={dialogRef}
+            className="signal-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="signal-modal-title"
+            aria-describedby="signal-modal-description"
+            onMouseDown={(event) => event.stopPropagation()}
+            onKeyDown={handleDialogKeyDown}
+          >
+            <div className="signal-modal-head">
+              <div>
+                <span className="eyebrow">Detection Signal</span>
+                <h2 id="signal-modal-title">{selectedSignal.label}</h2>
+                <p id="signal-modal-description">{details.length} associated {details.length === 1 ? "finding" : "findings"} with the evidence used by Threat Radar.</p>
+              </div>
+              <button type="button" className="icon-button signal-modal-close" aria-label="Close signal details" onClick={closeDialog} autoFocus>
+                <X size={20} aria-hidden="true" />
+              </button>
+            </div>
+            <div className="signal-modal-body">
+              {details.length === 0 ? <EmptyRadarState title="No retained entities are available for this signal." /> : (
+                <div className="mini-table-wrap signal-detail-table-wrap">
+                  <table className="mini-ioc-table signal-detail-table">
+                    <thead>
+                      <tr>
+                        <th>Source IP</th>
+                        <th>Destination IP</th>
+                        <th>Logs</th>
+                        <th>Event actions</th>
+                        <th>Infrastructure</th>
+                        <th>Destination ports</th>
+                        <th>Score</th>
+                        <th>GTI / VT</th>
+                        <th>Evidence</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {visibleDetails.map((detail) => (
+                        <tr key={detail.id}>
+                          <td className="mono-cell">{detail.sourceIp}</td>
+                          <td className="mono-cell">{detail.destinationIp}</td>
+                          <td>{detail.events.toLocaleString()}</td>
+                          <td>{formatSignalActions(detail.actions)}</td>
+                          <td>{detail.infrastructureCount.toLocaleString()}</td>
+                          <td>{detail.ports.length ? detail.ports.join(", ") : "--"}</td>
+                          <td><Badge value={String(detail.score)} /></td>
+                          <td>{formatGti(detail.gti, detail.gtiTarget)}</td>
+                          <td>{detail.evidence.slice(0, 3).join(" | ") || "--"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+            {details.length > 0 ? (
+              <RadarPagination
+                page={currentPage}
+                pageCount={pageCount}
+                total={details.length}
+                pageSize={pageSize}
+                onChange={setPage}
+                ariaLabel={`${selectedSignal.label} finding pages`}
+              />
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function buildDetectionSignalSummaries(result: ThreatRadarResponse | null): Array<{ key: string; label: string; count: number }> {
+  if (!result) return [];
+  const labels = new Map(result.signals.map((signal) => [signal.key, signal.label]));
+  if (result.suspects.some((finding) => isPublicInboundSource(finding) && finding.deniedEvents > 0)) labels.set("denied", labels.get("denied") ?? "Denied activity");
+  if (result.suspects.some((finding) => finding.direction === "outbound")) labels.set("outbound", labels.get("outbound") ?? "Suspicious outbound");
+  if (result.suspects.some((finding) => isPublicInboundSource(finding) && finding.dangerousPorts.length > 0)) labels.set("dangerous_ports", labels.get("dangerous_ports") ?? "Risky ports");
+  if (result.suspiciousIndicators.length > 0) labels.set("indicators", labels.get("indicators") ?? "Domain and hash indicators");
+  for (const key of [...result.suspects.flatMap((finding) => finding.matchedKeywords), ...result.suspiciousIndicators.flatMap((indicator) => indicator.matchedKeywords)]) {
+    labels.set(key, labels.get(key) ?? formatRadarSignal(key));
+  }
+  return [...labels.entries()]
+    .map(([key, label]) => ({ key, label, count: getThreatSignalDetails(result, key).length }))
+    .filter((signal) => signal.count > 0)
+    .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label));
+}
+
+function getThreatSignalDetails(result: ThreatRadarResponse, signalKey: string): ThreatSignalDetail[] {
+  const details: ThreatSignalDetail[] = [];
+  if (signalKey !== "indicators") {
+    for (const finding of result.suspects.filter((item) => findingMatchesSignal(item, signalKey))) {
+      details.push({
+        id: `ip:${finding.role}:${finding.direction}:${finding.ip}`,
+        entity: finding.ip,
+        sourceIp: finding.sourceIp,
+        destinationIp: finding.destinationIp,
+        events: finding.events,
+        actions: finding.actions,
+        infrastructureCount: finding.infrastructureCount,
+        ports: finding.topPorts,
+        score: finding.score,
+        gti: finding.gti,
+        gtiTarget: finding.gtiIp,
+        evidence: finding.active === false ? ["Retained from history", ...finding.reasons] : finding.reasons
+      });
+    }
+  }
+  if (signalKey === "indicators" || !["denied", "outbound", "dangerous_ports"].includes(signalKey)) {
+    for (const indicator of result.suspiciousIndicators.filter((item) => signalKey === "indicators" || item.matchedKeywords.includes(signalKey))) {
+      details.push({
+        id: `${indicator.type}:${indicator.value}`,
+        entity: indicator.value,
+        sourceIp: indicator.latest?.sourceIp ?? "--",
+        destinationIp: indicator.latest?.destinationIp ?? "--",
+        events: indicator.events,
+        actions: indicator.actions,
+        infrastructureCount: indicator.infrastructureCount,
+        ports: indicator.latest?.destinationPort ? [indicator.latest.destinationPort] : [],
+        score: indicator.score,
+        gti: indicator.gti,
+        gtiTarget: indicator.value,
+        evidence: indicator.reasons
+      });
+    }
+  }
+  return details.sort((left, right) => right.score - left.score || right.events - left.events || left.entity.localeCompare(right.entity));
+}
+
+function findingMatchesSignal(finding: ThreatRadarSuspect, signalKey: string): boolean {
+  if (signalKey === "denied") return isPublicInboundSource(finding) && finding.deniedEvents > 0;
+  if (signalKey === "outbound") return finding.direction === "outbound";
+  if (signalKey === "dangerous_ports") return isPublicInboundSource(finding) && finding.dangerousPorts.length > 0;
+  return finding.matchedKeywords.includes(signalKey);
+}
+
+function isPublicInboundSource(finding: ThreatRadarSuspect): boolean {
+  return finding.role === "source" && finding.direction === "inbound" && !isPrivateAddress(finding.ip);
+}
+
+function isPrivateAddress(value: string): boolean {
+  if (value.includes(":")) {
+    const normalized = value.toLowerCase();
+    return normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe8") || normalized.startsWith("fe9") || normalized.startsWith("fea") || normalized.startsWith("feb");
+  }
+  const parts = value.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return true;
+  const first = parts[0] ?? -1;
+  const second = parts[1] ?? -1;
+  return first === 10
+    || (first === 172 && second >= 16 && second <= 31)
+    || (first === 192 && second === 168)
+    || first === 127
+    || first === 0
+    || (first === 169 && second === 254)
+    || (first === 100 && second >= 64 && second <= 127)
+    || first >= 224;
+}
+
+function formatSignalActions(actions: Array<{ key: string; count: number }>): string {
+  return actions.length ? actions.slice(0, 4).map((action) => `${action.key} (${action.count.toLocaleString()})`).join(", ") : "--";
+}
+
+function RadarPagination({ page, pageCount, total, pageSize, onChange, ariaLabel = "Radar card pages" }: { page: number; pageCount: number; total: number; pageSize: number; onChange: (page: number) => void; ariaLabel?: string }) {
   if (pageCount <= 1) return <span className="radar-result-count">{total} result{total === 1 ? "" : "s"}</span>;
   const pages = compactPageNumbers(page, pageCount);
   const from = (page - 1) * pageSize + 1;
   const to = Math.min(total, page * pageSize);
   return (
-    <nav className="radar-pagination" aria-label="Radar card pages">
+    <nav className="radar-pagination" aria-label={ariaLabel}>
       <span>{from}-{to} of {total}</span>
       <div>
         <button className="icon-button" aria-label="Previous page" onClick={() => onChange(page - 1)} disabled={page === 1}><ChevronLeft size={16} aria-hidden="true" /></button>
@@ -1716,10 +2566,10 @@ function ThreatRadarLead({ suspect }: { suspect: ThreatRadarSuspect }) {
   );
 }
 
-function EmptyRadarState() {
+function EmptyRadarState({ title = "No suspicious flows scored yet." }: { title?: string } = {}) {
   return (
     <div className="empty-card">
-      <strong>No suspicious flows scored yet.</strong>
+      <strong>{title}</strong>
       <span>Run an analysis now or wait for the next scheduled agent scan.</span>
     </div>
   );
@@ -1914,6 +2764,278 @@ function IntelPivots({ ioc }: { ioc: HuntedIOC | undefined }) {
   );
 }
 
+function AlertsPanel() {
+  const [dashboard, setDashboard] = useState<AlertDashboardResponse | null>(null);
+  const [loadingAlerts, setLoadingAlerts] = useState(true);
+  const [alertError, setAlertError] = useState<string | null>(null);
+  const [savedMessage, setSavedMessage] = useState<string | null>(null);
+  const [ruleName, setRuleName] = useState("");
+  const [indicatorType, setIndicatorType] = useState<AlertRule["indicatorType"]>("ip");
+  const [indicatorValue, setIndicatorValue] = useState("");
+  const [minScore, setMinScore] = useState(55);
+  const [browserNotifications, setBrowserNotifications] = useState(true);
+  const [cooldownMinutes, setCooldownMinutes] = useState(60);
+  const [discordWebhookUrl, setDiscordWebhookUrl] = useState("");
+  const [telegramBotToken, setTelegramBotToken] = useState("");
+  const [telegramChatId, setTelegramChatId] = useState("");
+  const [historyPage, setHistoryPage] = useState(1);
+
+  const historyPageSize = 10;
+  const historyPageCount = Math.max(1, Math.ceil((dashboard?.history.length ?? 0) / historyPageSize));
+  const currentHistoryPage = Math.min(historyPage, historyPageCount);
+  const visibleHistory = dashboard?.history.slice((currentHistoryPage - 1) * historyPageSize, currentHistoryPage * historyPageSize) ?? [];
+
+  useEffect(() => {
+    void loadAlerts(true);
+    const interval = window.setInterval(() => void loadAlerts(false), 15000);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    setHistoryPage((page) => Math.min(page, historyPageCount));
+  }, [historyPageCount]);
+
+  async function loadAlerts(showLoading: boolean) {
+    if (showLoading) setLoadingAlerts(true);
+    const response = await sendBridgeMessage<unknown, AlertDashboardResponse>("alerts.get", {});
+    if (response.success) {
+      setDashboard(response.data);
+      setBrowserNotifications(response.data.config.browserNotifications);
+      setCooldownMinutes(response.data.config.cooldownMinutes);
+      setAlertError(null);
+    } else {
+      setAlertError(response.error.message);
+    }
+    if (showLoading) setLoadingAlerts(false);
+  }
+
+  async function addRule(event: React.FormEvent) {
+    event.preventDefault();
+    setLoadingAlerts(true);
+    setAlertError(null);
+    setSavedMessage(null);
+    const response = await sendBridgeMessage<unknown, AlertDashboardResponse>("alerts.rule.add", {
+      name: ruleName,
+      indicatorType,
+      indicatorValue,
+      minScore
+    });
+    if (response.success) {
+      setDashboard(response.data);
+      setRuleName("");
+      setIndicatorValue("");
+      setSavedMessage("Alert rule saved. Threat Radar will evaluate it on every scan.");
+    } else {
+      setAlertError(response.error.message);
+    }
+    setLoadingAlerts(false);
+  }
+
+  async function removeRule(id: string) {
+    setLoadingAlerts(true);
+    setAlertError(null);
+    const response = await sendBridgeMessage<unknown, AlertDashboardResponse>("alerts.rule.remove", { id });
+    if (response.success) setDashboard(response.data);
+    else setAlertError(response.error.message);
+    setLoadingAlerts(false);
+  }
+
+  async function saveDelivery(options: { clearDiscord?: boolean; clearTelegram?: boolean } = {}) {
+    setLoadingAlerts(true);
+    setAlertError(null);
+    setSavedMessage(null);
+    const response = await sendBridgeMessage<unknown, AlertDashboardResponse>("alerts.configure", {
+      browserNotifications,
+      cooldownMinutes,
+      discordWebhookUrl,
+      telegramBotToken,
+      telegramChatId,
+      ...options
+    });
+    if (response.success) {
+      setDashboard(response.data);
+      setDiscordWebhookUrl("");
+      setTelegramBotToken("");
+      setTelegramChatId("");
+      setSavedMessage("Alert delivery settings saved.");
+    } else {
+      setAlertError(response.error.message);
+    }
+    setLoadingAlerts(false);
+  }
+
+  async function clearHistory() {
+    setLoadingAlerts(true);
+    setAlertError(null);
+    const response = await sendBridgeMessage<unknown, AlertDashboardResponse>("alerts.history.clear", {});
+    if (response.success) {
+      setDashboard(response.data);
+      setHistoryPage(1);
+      setSavedMessage("Alert history cleared. Saved rules are still active.");
+    } else {
+      setAlertError(response.error.message);
+    }
+    setLoadingAlerts(false);
+  }
+
+  const channelCount = dashboard
+    ? Number(dashboard.config.browserNotifications) + Number(dashboard.config.discordConfigured) + Number(dashboard.config.telegramConfigured)
+    : 0;
+  const criticalCount = dashboard?.history.filter((item) => item.severity === "critical").length ?? 0;
+
+  return (
+    <section className="grid alerts-view">
+      <div className="status-strip wide" aria-label="Alert system summary">
+        <StatusTile label="Active Rules" value={String(dashboard?.rules.filter((rule) => rule.enabled).length ?? 0)} tone={dashboard?.rules.length ? "healthy" : "unknown"} />
+        <StatusTile label="Alert Events" value={String(dashboard?.history.length ?? 0)} tone={dashboard?.history.length ? "critical" : "unknown"} />
+        <StatusTile label="Critical" value={String(criticalCount)} tone={criticalCount ? "critical" : "unknown"} />
+        <StatusTile label="Delivery Channels" value={String(channelCount)} tone={channelCount ? "healthy" : "unknown"} />
+      </div>
+
+      {alertError ? <div className="notice wide" role="alert"><AlertTriangle size={18} aria-hidden="true" /><div><strong>Alert operation failed</strong><span>{alertError}</span></div></div> : null}
+      {savedMessage ? <div className="alert-success wide" role="status">{savedMessage}</div> : null}
+
+      <div className="panel alert-rules-panel">
+        <div className="panel-title-row">
+          <div>
+            <h2>IOC Alert Rules</h2>
+            <p className="muted">Notify when a promoted Threat Radar finding contains this exact IP, domain, or hash.</p>
+          </div>
+          <button className="icon-button" type="button" aria-label="Refresh alert rules" onClick={() => void loadAlerts(true)} disabled={loadingAlerts}>
+            <RefreshCw size={18} aria-hidden="true" className={loadingAlerts ? "spin" : ""} />
+          </button>
+        </div>
+        <form className="alert-rule-form" onSubmit={addRule}>
+          <label className="field">
+            <span>Rule name</span>
+            <input value={ruleName} onChange={(event) => setRuleName(event.target.value)} placeholder="SSH scanner watch" maxLength={120} />
+          </label>
+          <label className="field">
+            <span>Indicator type</span>
+            <select value={indicatorType} onChange={(event) => setIndicatorType(event.target.value as AlertRule["indicatorType"])}>
+              <option value="ip">IP address</option>
+              <option value="domain">Domain</option>
+              <option value="hash">File hash</option>
+            </select>
+          </label>
+          <label className="field alert-indicator-field">
+            <span>Indicator</span>
+            <input value={indicatorValue} onChange={(event) => setIndicatorValue(event.target.value)} placeholder={indicatorType === "ip" ? "203.0.113.10" : indicatorType === "domain" ? "example.com" : "MD5, SHA-1, or SHA-256"} required />
+          </label>
+          <label className="field">
+            <span>Minimum score</span>
+            <input type="number" min="0" max="200" value={minScore} onChange={(event) => setMinScore(Number(event.target.value))} />
+          </label>
+          <button className="primary alert-add-rule" type="submit" disabled={loadingAlerts || !indicatorValue.trim()}>
+            <Bell size={17} aria-hidden="true" />
+            <span>Add Alert Rule</span>
+          </button>
+        </form>
+
+        {dashboard?.rules.length ? (
+          <div className="mini-table-wrap alert-table-wrap">
+            <table className="mini-ioc-table alert-rules-table">
+              <thead><tr><th>Rule</th><th>Indicator</th><th>Minimum score</th><th>Created</th><th>Action</th></tr></thead>
+              <tbody>{dashboard.rules.map((rule) => (
+                <tr key={rule.id}>
+                  <td><strong>{rule.name}</strong></td>
+                  <td><Badge value={rule.indicatorType.toUpperCase()} /> <span className="mono-cell">{rule.indicatorValue}</span></td>
+                  <td>{rule.minScore}</td>
+                  <td>{new Date(rule.createdAt).toLocaleString()}</td>
+                  <td><button className="icon-button danger-button" type="button" aria-label={`Remove alert rule ${rule.name}`} onClick={() => void removeRule(rule.id)} disabled={loadingAlerts}><Trash2 size={17} aria-hidden="true" /></button></td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        ) : <div className="empty-card"><strong>No IOC alert rules yet.</strong><span>Automatic high-confidence detections still create alert events.</span></div>}
+      </div>
+
+      <div className="panel alert-delivery-panel">
+        <div>
+          <h2>Delivery</h2>
+          <p className="muted">Secrets stay in extension-local storage and are never returned to the webpage.</p>
+        </div>
+        <label className="agent-toggle">
+          <input type="checkbox" checked={browserNotifications} onChange={(event) => setBrowserNotifications(event.target.checked)} />
+          <span>Chrome desktop notifications</span>
+        </label>
+        <label className="field">
+          <span>Alert cooldown</span>
+          <select value={cooldownMinutes} onChange={(event) => setCooldownMinutes(Number(event.target.value))}>
+            <option value="5">5 minutes</option>
+            <option value="15">15 minutes</option>
+            <option value="60">1 hour</option>
+            <option value="360">6 hours</option>
+            <option value="1440">24 hours</option>
+          </select>
+        </label>
+        <label className="field">
+          <span>Discord webhook</span>
+          <input type="password" autoComplete="off" value={discordWebhookUrl} onChange={(event) => setDiscordWebhookUrl(event.target.value)} placeholder={dashboard?.config.discordConfigured ? "Configured; leave blank to keep" : "https://discord.com/api/webhooks/..."} />
+        </label>
+        <label className="field">
+          <span>Telegram bot token</span>
+          <input type="password" autoComplete="off" value={telegramBotToken} onChange={(event) => setTelegramBotToken(event.target.value)} placeholder={dashboard?.config.telegramConfigured ? "Configured; leave blank to keep" : "Bot token"} />
+        </label>
+        <label className="field">
+          <span>Telegram chat ID</span>
+          <input value={telegramChatId} onChange={(event) => setTelegramChatId(event.target.value)} placeholder={dashboard?.config.telegramConfigured ? "Configured; leave blank to keep" : "Chat or channel ID"} />
+        </label>
+        <div className="alert-channel-status" aria-label="Configured alert channels">
+          <Badge value={dashboard?.config.discordConfigured ? "Discord ready" : "Discord off"} />
+          <Badge value={dashboard?.config.telegramConfigured ? "Telegram ready" : "Telegram off"} />
+        </div>
+        <div className="alert-delivery-actions">
+          <button className="primary" type="button" onClick={() => void saveDelivery()} disabled={loadingAlerts}><ShieldCheck size={17} aria-hidden="true" /><span>Save Delivery</span></button>
+          {dashboard?.config.discordConfigured ? <button className="secondary" type="button" onClick={() => void saveDelivery({ clearDiscord: true })} disabled={loadingAlerts}>Remove Discord</button> : null}
+          {dashboard?.config.telegramConfigured ? <button className="secondary" type="button" onClick={() => void saveDelivery({ clearTelegram: true })} disabled={loadingAlerts}>Remove Telegram</button> : null}
+        </div>
+      </div>
+
+      <div className="panel wide alert-history-panel">
+        <div className="panel-title-row">
+          <div><h2>Alert History</h2><p className="muted">Corroborated detections and watched IOC matches retained by the extension.</p></div>
+          <button className="secondary danger-action" type="button" onClick={() => void clearHistory()} disabled={loadingAlerts || !dashboard?.history.length}><Trash2 size={17} aria-hidden="true" /><span>Clear History</span></button>
+        </div>
+        {visibleHistory.length ? (
+          <>
+            <div className="mini-table-wrap alert-table-wrap">
+              <table className="mini-ioc-table alert-history-table">
+                <thead><tr><th>Severity</th><th>Alert</th><th>Indicator / route</th><th>Score</th><th>Events</th><th>Evidence</th><th>Occurrences</th><th>Last seen</th><th>Delivery</th></tr></thead>
+                <tbody>{visibleHistory.map((item) => (
+                  <tr key={item.id}>
+                    <td><Badge value={item.severity} /></td>
+                    <td><strong>{item.title}</strong>{item.ruleNames.length ? <small>{item.ruleNames.join(", ")}</small> : null}</td>
+                    <td className="mono-cell"><strong>{item.indicator}</strong><small>{item.sourceIp || item.destinationIp ? `${item.sourceIp ?? "--"} -> ${item.destinationIp ?? "--"}` : item.indicatorType}</small></td>
+                    <td><Badge value={String(item.score)} /></td>
+                    <td>{item.events.toLocaleString()}</td>
+                    <td>{item.reasons.slice(0, 3).join(" | ") || "--"}</td>
+                    <td>{item.occurrences}</td>
+                    <td>{new Date(item.lastSeenAt).toLocaleString()}</td>
+                    <td><AlertDeliveryCell delivery={item.delivery} /></td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+            <RadarPagination page={currentHistoryPage} pageCount={historyPageCount} total={dashboard?.history.length ?? 0} pageSize={historyPageSize} onChange={setHistoryPage} ariaLabel="Alert history pages" />
+          </>
+        ) : <div className="empty-card"><strong>No alert events yet.</strong><span>Scheduled and manual Threat Radar scans will populate this history when evidence or an IOC rule matches.</span></div>}
+      </div>
+    </section>
+  );
+}
+
+function AlertDeliveryCell({ delivery }: { delivery: AlertDelivery }) {
+  const sent = (["browser", "discord", "telegram"] as const).filter((channel) => delivery[channel] === "sent");
+  const failed = (["browser", "discord", "telegram"] as const).filter((channel) => delivery[channel] === "failed");
+  return (
+    <div className="alert-delivery-cell">
+      <span>{sent.length ? `Sent: ${sent.join(", ")}` : "In-app only"}</span>
+      {failed.length ? <small title={delivery.errors.join(" | ")}>Failed: {failed.join(", ")}</small> : null}
+    </div>
+  );
+}
+
 function Placeholder({ panel }: { panel: Panel }) {
   return (
     <section className="panel wide">
@@ -1924,8 +3046,69 @@ function Placeholder({ panel }: { panel: Panel }) {
 }
 
 function Badge({ value }: { value: string }) {
-  const tone = value === "online" || value === "clear" || value === "match" ? "healthy" : value === "offline" || value === "error" || value === "critical" || value === "high" ? "critical" : "unknown";
+  const normalized = value.toLowerCase();
+  const tone = ["online", "clear", "match", "clean"].includes(normalized)
+    ? "healthy"
+    : ["offline", "error", "critical", "high", "malicious", "key rejected", "unavailable"].includes(normalized)
+      ? "critical"
+      : ["suspicious", "pending", "quota reached"].includes(normalized) ? "warning" : "unknown";
   return <span className={`badge ${tone}`}>{value}</span>;
+}
+
+function ReputationCell({
+  gti,
+  target,
+  status,
+  message,
+  cached
+}: {
+  gti: ThreatRadarSuspect["gti"];
+  target: string;
+  status: GtiLookupStatus | undefined;
+  message: string | undefined;
+  cached: boolean | undefined;
+}) {
+  const category = getGtiDisplayCategory(gti, status);
+  const engineRatio = gti?.totalEngines ? ` | VT ${gti.malicious}/${gti.totalEngines}` : "";
+  return (
+    <div className="reputation-cell" title={message}>
+      <Badge value={category} />
+      <span className="reputation-score">{gti
+        ? `GTI ${gti.threatScore}${engineRatio}${cached ? " | cached" : ""}`
+        : getGtiStatusText(status)}</span>
+      <span className="reputation-target" title={target}>{target !== "--" ? target : "No public IOC"}</span>
+    </div>
+  );
+}
+
+function getGtiDisplayCategory(gti: ThreatRadarSuspect["gti"], status?: GtiLookupStatus): string {
+  if (gti) return getGtiCategory(gti);
+  if (status === "pending") return "Pending";
+  if (status === "rate_limited") return "Quota reached";
+  if (status === "unauthorized") return "Key rejected";
+  if (status === "unavailable") return "Unavailable";
+  if (status === "not_found") return "Not found";
+  if (status === "not_configured") return "No key";
+  return "Unknown";
+}
+
+function getGtiStatusText(status?: GtiLookupStatus): string {
+  if (status === "pending") return "Waiting for automatic lookup";
+  if (status === "rate_limited") return "GTI quota reached; retry scheduled";
+  if (status === "unauthorized") return "Configured API key was rejected";
+  if (status === "unavailable") return "GTI/VT service could not be reached";
+  if (status === "not_found") return "No GTI/VT report exists";
+  if (status === "not_configured") return "Configure a GTI/VT API key";
+  return "Not scored";
+}
+
+function formatReputationCoverage(coverage: NonNullable<NonNullable<ThreatRadarResponse["analysis"]>["reputation"]>): string {
+  const details = [`${coverage.scored.toLocaleString()} of ${coverage.requested.toLocaleString()} candidates scored`];
+  if (coverage.cached > 0) details.push(`${coverage.cached.toLocaleString()} served from cache`);
+  if (coverage.pending > 0) details.push(`${coverage.pending.toLocaleString()} queued`);
+  if (coverage.rateLimited > 0) details.push(`${coverage.rateLimited.toLocaleString()} rate limited`);
+  if (coverage.failed > 0) details.push(`${coverage.failed.toLocaleString()} unavailable`);
+  return `${details.join(" | ")}. Pending reputation checks retry automatically on later agent scans.`;
 }
 
 function buildIntelPivots(value: string, type: string) {
@@ -1971,14 +3154,91 @@ function huntTimeRangeToParams(range: HuntTimeRange): { from: string } {
   return { from: "now-30d" };
 }
 
+function loadIocHuntOffset(range: HuntTimeRange): number {
+  try {
+    const stored = JSON.parse(localStorage.getItem(IOC_HUNT_CURSOR_KEY) ?? "{}") as Record<string, unknown>;
+    return typeof stored[range] === "number" && Number.isInteger(stored[range]) && stored[range] >= 0 ? stored[range] : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function saveIocHuntOffset(range: HuntTimeRange, offset: number): void {
+  try {
+    const stored = JSON.parse(localStorage.getItem(IOC_HUNT_CURSOR_KEY) ?? "{}") as Record<string, unknown>;
+    localStorage.setItem(IOC_HUNT_CURSOR_KEY, JSON.stringify({ ...stored, [range]: Math.max(0, Math.floor(offset)) }));
+  } catch {
+    // A missing cursor only causes the next hunt to start from batch one.
+  }
+}
+
 function threatRadarTimeRangeToParams(range: RadarTimeRange): { from: string } {
   if (range === "last15m") return { from: "now-15m" };
   if (range === "last1h") return { from: "now-1h" };
   return { from: "now/d" };
 }
 
+function formatRadarRangeLabel(range: RadarTimeRange): string {
+  if (range === "last15m") return "Last 15 minutes";
+  if (range === "last1h") return "Last 1 hour";
+  return "Today";
+}
+
+function loadPinnedThreatRadarAnalysis(): PinnedThreatRadarAnalysis | null {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(THREAT_RADAR_PINNED_ANALYSIS_KEY) ?? "null") as Partial<PinnedThreatRadarAnalysis> | null;
+    if (!parsed || !["last15m", "last1h", "today"].includes(parsed.range ?? "")) return null;
+    if (!parsed.report || typeof parsed.report.analyzedAt !== "string" || !Array.isArray(parsed.report.suspects)) return null;
+    if (!hasThreatRadarCoreCoverage(parsed.report as ThreatRadarResponse)) {
+      localStorage.removeItem(THREAT_RADAR_PINNED_ANALYSIS_KEY);
+      return null;
+    }
+    return parsed as PinnedThreatRadarAnalysis;
+  } catch {
+    return null;
+  }
+}
+
+function hasThreatRadarCoreCoverage(report: ThreatRadarResponse): boolean {
+  if (report.analysis?.strategy !== "staged") return true;
+  return report.analysis.completedStages.some((stage) => stage === "source IP activity" || stage === "destination IP activity");
+}
+
+function savePinnedThreatRadarAnalysis(analysis: PinnedThreatRadarAnalysis): void {
+  try {
+    localStorage.setItem(THREAT_RADAR_PINNED_ANALYSIS_KEY, JSON.stringify(analysis));
+  } catch {
+    // The in-memory snapshot remains pinned when browser storage is unavailable.
+  }
+}
+
+function clearPinnedThreatRadarAnalysis(): void {
+  try {
+    localStorage.removeItem(THREAT_RADAR_PINNED_ANALYSIS_KEY);
+  } catch {
+    // The current session still switches back to automatic results.
+  }
+}
+
+function formatThreatRadarError(message: string, range: RadarTimeRange): string {
+  if (/HTTP 502|Bad Gateway/i.test(message)) {
+    return range === "today"
+      ? "Kibana could not complete any stage of the Today analysis. Your previous pinned findings remain visible; try Last 1 hour while Kibana recovers."
+      : "Kibana returned HTTP 502 while analyzing this window. Try Analyze Logs again after the Kibana session responds.";
+  }
+  return message;
+}
+
 function loadThreatRadarLayout(): RadarLayoutItem[] {
-  const fallback: RadarLayoutItem[] = [{ id: "sources" }, { id: "destinations" }, { id: "ports" }];
+  const fallback: RadarLayoutItem[] = [
+    { id: "sources" },
+    { id: "destinations" },
+    { id: "outbound" },
+    { id: "denied" },
+    { id: "ports" },
+    { id: "indicators" },
+    { id: "review" }
+  ];
   try {
     const value = localStorage.getItem(THREAT_RADAR_LAYOUT_KEY);
     if (!value) return fallback;
@@ -1990,7 +3250,7 @@ function loadThreatRadarLayout(): RadarLayoutItem[] {
         const record = typeof item === "object" && item !== null ? (item as Partial<RadarLayoutItem>) : {};
         const legacyId = (record as { id?: string }).id;
         const id = legacyId === "lead" ? "ports" : legacyId;
-        if (id !== "sources" && id !== "destinations" && id !== "ports") return null;
+        if (id !== "sources" && id !== "destinations" && id !== "outbound" && id !== "denied" && id !== "ports" && id !== "indicators" && id !== "review") return null;
         ids.add(id);
         return {
           id,
@@ -2002,7 +3262,16 @@ function loadThreatRadarLayout(): RadarLayoutItem[] {
       })
       .filter(Boolean) as RadarLayoutItem[];
     for (const item of fallback) {
-      if (!ids.has(item.id)) items.push(item);
+      if (ids.has(item.id)) continue;
+      const usesCanvas = items.length > 0 && items.every((entry) => typeof entry.x === "number" && typeof entry.y === "number");
+      if (!usesCanvas) {
+        items.push(item);
+        continue;
+      }
+      const nextY = Math.max(...items.map((entry) => (
+        (entry.y ?? 0) + (entry.height ?? defaultRadarCardSize(entry.id).height) + 18
+      )));
+      items.push({ ...item, x: 0, y: nextY });
     }
     return items;
   } catch {
@@ -2011,7 +3280,7 @@ function loadThreatRadarLayout(): RadarLayoutItem[] {
 }
 
 function defaultRadarCardSize(id: RadarCardId): { width: number; height: number } {
-  if (id === "ports") return { width: 720, height: 440 };
+  if (id === "ports" || id === "indicators" || id === "review") return { width: 760, height: 440 };
   return { width: 820, height: 420 };
 }
 
@@ -2068,14 +3337,40 @@ function isLayoutControlTarget(target: EventTarget | null): boolean {
 function sortRadarSuspects(suspects: ThreatRadarSuspect[], sort: RadarSort): ThreatRadarSuspect[] {
   const sorted = [...suspects];
   sorted.sort((left, right) => {
-    if (sort === "score-desc") return right.score - left.score;
-    if (sort === "score-asc") return left.score - right.score;
-    if (sort === "events-desc") return right.events - left.events;
-    if (sort === "events-asc") return left.events - right.events;
-    if (sort === "ip-desc") return right.ip.localeCompare(left.ip, undefined, { numeric: true });
-    return left.ip.localeCompare(right.ip, undefined, { numeric: true });
+    let comparison = 0;
+    if (sort.field === "sourceIp") comparison = left.sourceIp.localeCompare(right.sourceIp, undefined, { numeric: true });
+    if (sort.field === "destinationIp") comparison = left.destinationIp.localeCompare(right.destinationIp, undefined, { numeric: true });
+    if (sort.field === "score") comparison = left.score - right.score;
+    if (sort.field === "gti") {
+      comparison = getGtiCategoryWeight(left.gti) - getGtiCategoryWeight(right.gti)
+        || (left.gti?.threatScore ?? -1) - (right.gti?.threatScore ?? -1)
+        || left.score - right.score;
+    }
+    if (sort.field === "events") comparison = left.events - right.events;
+    if (sort.field === "denied") comparison = (left.deniedEvents ?? 0) - (right.deniedEvents ?? 0);
+    if (sort.field === "outbound") comparison = (left.outboundEvents ?? 0) - (right.outboundEvents ?? 0);
+    if (sort.field === "infrastructure") comparison = left.infrastructureCount - right.infrastructureCount;
+    if (sort.field === "ports") comparison = left.destinationPorts - right.destinationPorts;
+    if (sort.field === "history") comparison = (left.eventDelta ?? 0) - (right.eventDelta ?? 0) || (left.observations ?? 1) - (right.observations ?? 1);
+    if (sort.field === "reasons") comparison = left.reasons.join(" ").localeCompare(right.reasons.join(" "));
+    if (comparison === 0) comparison = left.sourceIp.localeCompare(right.sourceIp, undefined, { numeric: true });
+    return sort.direction === "asc" ? comparison : -comparison;
   });
   return sorted;
+}
+
+function formatRadarSignal(value: string): string {
+  return value.split("_").map((part) => part ? `${part.charAt(0).toUpperCase()}${part.slice(1)}` : part).join(" ");
+}
+
+function formatRelativeTime(value: string): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return "Previously seen";
+  const elapsedMinutes = Math.max(0, Math.round((Date.now() - timestamp) / 60000));
+  if (elapsedMinutes < 1) return "Seen now";
+  if (elapsedMinutes < 60) return `${elapsedMinutes}m ago`;
+  const elapsedHours = Math.round(elapsedMinutes / 60);
+  return elapsedHours < 24 ? `${elapsedHours}h ago` : `${Math.round(elapsedHours / 24)}d ago`;
 }
 
 function formatDestination(suspect: ThreatRadarSuspect): string {
@@ -2084,10 +3379,31 @@ function formatDestination(suspect: ThreatRadarSuspect): string {
   return `${destinationIp}${port ? `:${port}` : ""}`;
 }
 
-function formatGti(gti: ThreatRadarSuspect["gti"]): string {
-  if (!gti) return "Not enriched";
+function formatGti(gti: ThreatRadarSuspect["gti"], target = ""): string {
+  if (!gti) return `Unknown | not scored${target && target !== "--" ? ` | ${target}` : ""}`;
   const verdict = gti.verdict?.replace("VERDICT_", "").toLowerCase() ?? "unknown";
-  return `score ${gti.threatScore} | ${verdict} | VT ${gti.malicious}/${gti.suspicious}`;
+  const vendorTotal = gti.totalEngines ?? gti.malicious + gti.suspicious;
+  return `${getGtiCategory(gti)} | GTI ${gti.threatScore} | ${verdict} | VT ${gti.malicious}/${vendorTotal}${target && target !== "--" ? ` | ${target}` : ""}`;
+}
+
+function getGtiCategory(gti: ThreatRadarSuspect["gti"]): "Malicious" | "Suspicious" | "Clean" | "Unknown" {
+  if (!gti) return "Unknown";
+  if (/malicious/i.test(gti.verdict ?? "") || gti.malicious >= 3 || /critical|high/i.test(gti.severity ?? "") || gti.threatScore >= 70) return "Malicious";
+  if (/suspicious/i.test(gti.verdict ?? "")
+    || gti.malicious > 0
+    || gti.suspicious > 0
+    || /medium/i.test(gti.severity ?? "")
+    || gti.threatScore >= 20
+    || gti.reputation < 0) return "Suspicious";
+  return "Clean";
+}
+
+function getGtiCategoryWeight(gti: ThreatRadarSuspect["gti"]): number {
+  const category = getGtiCategory(gti);
+  if (category === "Malicious") return 3;
+  if (category === "Suspicious") return 2;
+  if (category === "Unknown") return 1;
+  return 0;
 }
 
 function useAnimatedHuntStages(status: HuntStatus, total: number): { vendors: number; normalized: number; checked: number } {
@@ -2107,10 +3423,11 @@ function useAnimatedHuntStages(status: HuntStatus, total: number): { vendors: nu
   }, [status]);
 
   const ceiling = Math.max(0, total);
+  const pendingCeiling = ceiling > 1 ? ceiling - 1 : ceiling;
   return {
     vendors: Math.min(ceiling, tick * 10),
     normalized: Math.min(ceiling, Math.max(0, tick - 5) * 9),
-    checked: Math.min(ceiling, Math.max(0, tick - 11) * 7)
+    checked: Math.min(pendingCeiling, Math.max(0, tick - 11) * 7)
   };
 }
 

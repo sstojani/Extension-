@@ -25,6 +25,14 @@ For development:
 npm run dev -w apps/web
 ```
 
+To run the web app and rebuild the extension automatically when source files change:
+
+```powershell
+npm.cmd run dev:all
+```
+
+The web app hot-reloads in the browser. The extension watcher rebuilds `apps/extension/dist`; use the reload button on `chrome://extensions` to activate the updated extension service worker.
+
 Configure the web app with the extension ID:
 
 ```bash

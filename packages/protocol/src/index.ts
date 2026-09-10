@@ -17,6 +17,11 @@ export const bridgeActions = [
   "threatRadar.analyze",
   "threatRadar.agent.configure",
   "threatRadar.agent.run",
+  "alerts.get",
+  "alerts.configure",
+  "alerts.rule.add",
+  "alerts.rule.remove",
+  "alerts.history.clear",
   "config.get",
   "config.save",
   "logs.search",
@@ -227,7 +232,8 @@ export const dailyIocHuntParamsSchema = z
     from: z.string().min(1).max(128).default("now-30d"),
     to: z.string().min(1).max(128).default("now"),
     size: z.number().int().min(0).max(25).default(5),
-    maxIocs: z.number().int().min(1).max(5000).default(1000)
+    maxIocs: z.number().int().min(1).max(5000).default(500),
+    batchOffset: z.number().int().min(0).max(1000000).default(0)
   })
   .strict();
 

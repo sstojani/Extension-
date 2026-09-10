@@ -30,9 +30,13 @@ interface RawIntelIOC {
 
 type Collector = () => Promise<RawIntelIOC[]>;
 
-export async function collectDailyThreatIntel(maxIocs: number): Promise<{
+export async function collectDailyThreatIntel(maxIocs: number, batchOffset = 0): Promise<{
   iocs: ThreatIntelIOC[];
   providers: ThreatIntelProviderStatus[];
+  totalAvailable: number;
+  batchOffset: number;
+  batchSize: number;
+  hasMore: boolean;
 }> {
   const keys = await readProviderKeys();
   const collectors: Array<{ name: string; collect: Collector }> = [
@@ -66,9 +70,15 @@ export async function collectDailyThreatIntel(maxIocs: number): Promise<{
     }
   }
 
+  const deduped = dedupeIntel(records);
+  const iocs = deduped.slice(batchOffset, batchOffset + maxIocs);
   return {
-    iocs: dedupeIntel(records).slice(0, maxIocs),
-    providers
+    iocs,
+    providers,
+    totalAvailable: deduped.length,
+    batchOffset,
+    batchSize: iocs.length,
+    hasMore: batchOffset + iocs.length < deduped.length
   };
 }
 

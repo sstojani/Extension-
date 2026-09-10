@@ -1,11 +1,11 @@
 {
   "name": "@soc-watch/web",
-  "version": "0.1.0",
+  "version": "0.8.1",
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -b && vite build",
-    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -b && vite build --configLoader runner",
+    "dev": "vite --configLoader runner --host 127.0.0.1",
     "lint": "tsc -b --noEmit",
     "typecheck": "tsc -b --noEmit",
     "test": "vitest run --passWithNoTests"
