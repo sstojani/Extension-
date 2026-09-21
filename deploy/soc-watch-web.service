@@ -1,0 +1,23 @@
+[Unit]
+Description=SOC Watch web console
+Wants=network-online.target
+After=network-online.target tailscaled.service
+
+[Service]
+Type=simple
+User=socwatch
+Group=socwatch
+WorkingDirectory=/opt/soc-watch
+Environment=NODE_ENV=production
+Environment=SOC_WATCH_HOST=127.0.0.1
+Environment=SOC_WATCH_PORT=8080
+ExecStart=/usr/bin/node /opt/soc-watch/scripts/serve-web.mjs
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

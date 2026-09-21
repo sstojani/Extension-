@@ -12,6 +12,7 @@
     "build": "npm run build -w packages/protocol && npm run build -w packages/ioc && npm run build -w packages/health && npm run build -w apps/extension && npm run build -w apps/web",
     "package:extension": "node scripts/package-extension.mjs",
     "dev:all": "node scripts/dev-all.mjs",
+    "start:web": "node scripts/serve-web.mjs",
     "lint": "npm run lint --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"
