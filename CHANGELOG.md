@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.1 - 2026-09-22
+
+- Updated Vitest and its nested Vite, mocker, and esbuild toolchain to patched releases.
+- Removed all npm audit findings without using force or changing production runtime dependencies.
+- Documented Node.js 20 or newer as the minimum supported build environment.
+
 ## 0.12.0 - 2026-09-22
 
 - Added a mandatory startup check that opens the SOC console only after the Chrome bridge is detected.
