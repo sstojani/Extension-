@@ -1,4 +1,4 @@
-export type AlertIndicatorType = "ip" | "domain" | "hash";
+export type AlertIndicatorType = "ip" | "domain" | "hash" | "identity";
 
 export type ThreatAlertRule = {
   id: string;
@@ -11,10 +11,10 @@ export type ThreatAlertRule = {
 };
 
 type AlertGti = {
-  verdict?: string;
-  threatScore?: number;
-  malicious?: number;
-  suspicious?: number;
+  verdict?: string | undefined;
+  threatScore?: number | undefined;
+  malicious?: number | undefined;
+  suspicious?: number | undefined;
 };
 
 export type AlertableFinding = {
@@ -33,6 +33,7 @@ export type AlertableFinding = {
   reasons: string[];
   latest?: { action?: string | undefined; message?: string | undefined };
   gti?: AlertGti | undefined;
+  active?: boolean | undefined;
 };
 
 export type AlertableIndicator = {
@@ -42,12 +43,27 @@ export type AlertableIndicator = {
   events: number;
   reasons: string[];
   gti?: AlertGti | undefined;
+  active?: boolean | undefined;
+};
+
+export type AlertableIdentity = {
+  identity: string;
+  score: number;
+  severity: "critical" | "high" | "medium" | "low";
+  events: number;
+  failedEvents: number;
+  successfulEvents: number;
+  sourceIp: string;
+  destinationIp: string;
+  promoted: boolean;
+  reasons: string[];
+  active?: boolean | undefined;
 };
 
 export type ThreatAlertCandidate = {
   fingerprint: string;
   title: string;
-  category: "watched_ioc" | "access_risk" | "outbound_risk" | "malicious_indicator";
+  category: "watched_ioc" | "access_risk" | "outbound_risk" | "malicious_indicator" | "identity_risk";
   severity: "critical" | "high";
   indicatorType: AlertIndicatorType;
   indicator: string;
@@ -71,13 +87,14 @@ export function normalizeAlertIndicator(value: string): string {
 }
 
 export function buildThreatAlertCandidates(
-  report: { suspects?: AlertableFinding[]; suspiciousIndicators?: AlertableIndicator[] },
+  report: { suspects?: AlertableFinding[]; suspiciousIndicators?: AlertableIndicator[]; identityAnomalies?: AlertableIdentity[] },
   rules: ThreatAlertRule[]
 ): ThreatAlertCandidate[] {
   const enabledRules = rules.filter((rule) => rule.enabled);
   const candidates: ThreatAlertCandidate[] = [];
 
   for (const finding of report.suspects ?? []) {
+    if (finding.active === false) continue;
     const matchingRules = enabledRules.filter((rule) => rule.minScore <= finding.score && ruleMatchesFinding(rule, finding));
     const automaticCategory = automaticFindingCategory(finding);
     if (!automaticCategory && matchingRules.length === 0) continue;
@@ -107,6 +124,7 @@ export function buildThreatAlertCandidates(
   }
 
   for (const indicator of report.suspiciousIndicators ?? []) {
+    if (indicator.active === false) continue;
     const matchingRules = enabledRules.filter((rule) => rule.minScore <= indicator.score && ruleMatchesIndicator(rule, indicator));
     const malicious = isAdverseReputation(indicator.gti) && indicator.score >= 80;
     if (!malicious && matchingRules.length === 0) continue;
@@ -121,6 +139,31 @@ export function buildThreatAlertCandidates(
       score: indicator.score,
       events: indicator.events,
       reasons: indicator.reasons,
+      ruleIds: matchingRules.map((rule) => rule.id),
+      ruleNames: matchingRules.map((rule) => rule.name)
+    });
+  }
+
+  for (const identity of report.identityAnomalies ?? []) {
+    if (identity.active === false) continue;
+    const matchingRules = enabledRules.filter((rule) => (
+      rule.indicatorType === "identity"
+      && rule.minScore <= identity.score
+      && normalizeAlertIndicator(rule.indicatorValue) === normalizeAlertIndicator(identity.identity)
+    ));
+    if ((!identity.promoted || identity.score < 55) && matchingRules.length === 0) continue;
+    candidates.push({
+      fingerprint: `identity_risk|${normalizeAlertIndicator(identity.identity)}|${normalizeAlertIndicator(identity.sourceIp)}`,
+      title: "High-confidence identity risk",
+      category: "identity_risk",
+      severity: identity.score >= 80 ? "critical" : "high",
+      indicatorType: "identity",
+      indicator: identity.identity,
+      sourceIp: identity.sourceIp,
+      destinationIp: identity.destinationIp,
+      score: identity.score,
+      events: identity.events,
+      reasons: identity.reasons,
       ruleIds: matchingRules.map((rule) => rule.id),
       ruleNames: matchingRules.map((rule) => rule.name)
     });

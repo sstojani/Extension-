@@ -6,13 +6,13 @@ import { dirname, resolve } from "node:path";
 
 const extensionRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const distRoot = resolve(extensionRoot, "dist");
-const staticFiles = ["manifest.json", "src/popup.html", "src/popup.css", "src/popup.js", "src/icon-128.svg", "src/icon-128-off.svg"];
+const staticFiles = ["manifest.json", "src/popup.html", "src/popup.css", "src/popup.js", "src/icon-128.svg", "src/icon-128-off.svg", "public/icon-128.png"];
 
 async function copyStaticFiles() {
   await mkdir(distRoot, { recursive: true });
   await Promise.all(staticFiles.map((relativePath) => copyFile(
     resolve(extensionRoot, relativePath),
-    resolve(distRoot, relativePath.replace(/^src[\\/]/, ""))
+    resolve(distRoot, relativePath.replace(/^(?:src|public)[\\/]/, ""))
   )));
 }
 

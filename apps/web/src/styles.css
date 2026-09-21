@@ -32,6 +32,282 @@ button {
   cursor: pointer;
 }
 
+.extension-gate {
+  width: min(1180px, calc(100% - 40px));
+  min-height: 100vh;
+  margin: 0 auto;
+  padding: 28px 0 48px;
+}
+
+.extension-gate.checking {
+  display: grid;
+  place-items: center;
+}
+
+.extension-checking {
+  width: min(620px, 100%);
+  min-height: 124px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 18px;
+  border: 1px solid rgba(148, 163, 184, 0.26);
+  border-radius: 8px;
+  background: rgba(27, 35, 54, 0.82);
+  padding: 24px;
+}
+
+.extension-checking > svg:first-child {
+  color: #86efac;
+}
+
+.extension-checking h1,
+.extension-checking p {
+  margin: 0;
+}
+
+.extension-checking p:last-child {
+  margin-top: 6px;
+  color: #9fb0c7;
+}
+
+.install-brand {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.22);
+  padding-bottom: 18px;
+}
+
+.install-brand-mark,
+.install-verification-icon {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(34, 197, 94, 0.42);
+  border-radius: 8px;
+  background: rgba(34, 197, 94, 0.1);
+  color: #bbf7d0;
+}
+
+.install-brand > div {
+  display: grid;
+}
+
+.install-brand strong,
+.install-intro h1,
+.install-instructions h2,
+.install-verification h2,
+.install-steps strong {
+  font-family: "Fira Code", ui-monospace, monospace;
+}
+
+.install-brand span:not(.install-brand-mark):not(.install-version) {
+  color: #9fb0c7;
+}
+
+.install-version {
+  margin-left: auto;
+  color: #9fb0c7;
+  font-family: "Fira Code", ui-monospace, monospace;
+  font-size: 0.82rem;
+}
+
+.install-intro {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(300px, 0.75fr);
+  align-items: end;
+  gap: 36px;
+  padding: 48px 0 36px;
+}
+
+.install-intro h1 {
+  margin: 4px 0 10px;
+  font-size: 2rem;
+}
+
+.install-intro > div:first-child > p:last-child {
+  max-width: 720px;
+  margin: 0;
+  color: #b6c4d7;
+  font-size: 1.04rem;
+}
+
+.install-missing-status {
+  min-height: 84px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 12px;
+  border-left: 4px solid #ef4444;
+  background: rgba(127, 29, 29, 0.14);
+  padding: 14px 16px;
+}
+
+.install-missing-status > svg {
+  color: #fca5a5;
+}
+
+.install-missing-status div {
+  display: grid;
+  gap: 3px;
+}
+
+.install-missing-status span {
+  color: #fecaca;
+}
+
+.install-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(330px, 0.7fr);
+  gap: 24px;
+  align-items: start;
+  border-top: 1px solid rgba(148, 163, 184, 0.2);
+  padding-top: 28px;
+}
+
+.install-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 20px;
+}
+
+.install-section-heading h2,
+.install-section-heading p,
+.install-verification h2,
+.install-verification > p {
+  margin: 0;
+}
+
+.install-section-heading p,
+.install-verification > p {
+  margin-top: 4px;
+  color: #9fb0c7;
+}
+
+.install-download {
+  flex: 0 0 auto;
+  text-decoration: none;
+}
+
+.install-steps {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.install-steps li {
+  min-height: 104px;
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  border-top: 1px solid rgba(148, 163, 184, 0.18);
+  padding: 16px 0;
+}
+
+.install-steps li:last-child {
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.install-steps li > span {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(34, 197, 94, 0.38);
+  border-radius: 50%;
+  color: #bbf7d0;
+  font-family: "Fira Code", ui-monospace, monospace;
+  font-weight: 700;
+}
+
+.install-steps p {
+  margin: 5px 0 0;
+  color: #9fb0c7;
+}
+
+.install-steps code,
+.install-package-facts dd {
+  overflow-wrap: anywhere;
+}
+
+.install-verification {
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 8px;
+  background: rgba(27, 35, 54, 0.78);
+  padding: 20px;
+}
+
+.install-verification-icon {
+  margin-bottom: 18px;
+}
+
+.install-package-facts {
+  display: grid;
+  gap: 10px;
+  margin: 22px 0;
+}
+
+.install-package-facts div {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+  padding-bottom: 8px;
+}
+
+.install-package-facts dt {
+  color: #9fb0c7;
+}
+
+.install-package-facts dd {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  text-align: right;
+}
+
+.install-id-field {
+  margin-bottom: 14px;
+}
+
+.install-id-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px;
+  gap: 8px;
+}
+
+.install-id-control input {
+  min-width: 0;
+}
+
+.install-id-field small {
+  color: #71839b;
+}
+
+.install-id-control .icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.install-verify,
+.install-check-again {
+  width: 100%;
+  justify-content: center;
+}
+
+.install-check-again {
+  margin-top: 8px;
+}
+
 .shell {
   display: grid;
   grid-template-columns: 248px 1fr;
@@ -145,6 +421,32 @@ nav button.active {
   color: #bbf7d0;
 }
 
+.live-dot.connected {
+  border-color: rgba(34, 197, 94, 0.48);
+  background: rgba(34, 197, 94, 0.12);
+  color: #bbf7d0;
+}
+
+.live-dot.degraded,
+.live-dot.checking {
+  border-color: rgba(245, 158, 11, 0.48);
+  background: rgba(245, 158, 11, 0.12);
+  color: #fde68a;
+}
+
+.live-dot.disconnected {
+  border-color: rgba(239, 68, 68, 0.58);
+  background: rgba(239, 68, 68, 0.14);
+  color: #fecaca;
+}
+
+.danger-action {
+  background: #ef4444;
+  border-color: #ef4444;
+  color: #ffffff;
+  font-weight: 700;
+}
+
 .eyebrow {
   margin: 0;
   text-transform: uppercase;
@@ -213,6 +515,21 @@ h2 {
   color: #e0f2fe;
   font-family: "Fira Code", ui-monospace, monospace;
   font-size: 0.9rem;
+}
+
+.live-strip.healthy {
+  border-color: rgba(34, 197, 94, 0.32);
+  background: rgba(34, 197, 94, 0.08);
+}
+
+.live-strip.degraded {
+  border-color: rgba(245, 158, 11, 0.4);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.live-strip.disconnected {
+  border-color: rgba(239, 68, 68, 0.46);
+  background: rgba(239, 68, 68, 0.08);
 }
 
 .status,
@@ -341,6 +658,36 @@ h2 {
   text-align: center;
   padding: 10px;
   background: rgba(8, 17, 31, 0.74);
+}
+
+.flow-step span,
+.flow-step strong {
+  display: block;
+}
+
+.flow-step strong {
+  font-size: 0.78rem;
+}
+
+.flow-step.healthy {
+  border-color: rgba(34, 197, 94, 0.5);
+}
+
+.flow-step.healthy strong {
+  color: #86efac;
+}
+
+.flow-step.critical {
+  border-color: rgba(239, 68, 68, 0.6);
+  background: rgba(69, 10, 10, 0.2);
+}
+
+.flow-step.critical strong {
+  color: #fca5a5;
+}
+
+.flow-step.unknown strong {
+  color: #cbd5e1;
 }
 
 .facts {
@@ -552,7 +899,7 @@ td {
 
 .allowlist-editor {
   display: grid;
-  grid-template-columns: minmax(180px, 0.35fr) minmax(300px, 1fr) auto;
+  grid-template-columns: minmax(150px, 0.45fr) minmax(220px, 1fr) minmax(190px, 0.75fr) minmax(220px, 1fr) minmax(180px, 0.65fr) auto;
   align-items: end;
   gap: 12px;
 }
@@ -633,11 +980,28 @@ td {
 }
 
 .alert-channel-status,
-.alert-delivery-actions {
+.alert-delivery-actions,
+.alert-browser-status {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+
+.alert-browser-status {
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 6px;
+  padding: 9px 11px;
+  color: #b9c8dc;
+  font-size: 0.88rem;
+}
+
+.alert-browser-status.healthy {
+  border-color: rgba(34, 197, 94, 0.34);
+}
+
+.alert-browser-status.warning {
+  border-color: rgba(245, 158, 11, 0.42);
 }
 
 .alert-table-wrap {
@@ -649,7 +1013,7 @@ td {
 }
 
 .alert-history-table {
-  min-width: 1500px;
+  min-width: 1860px;
 }
 
 .alert-history-table td small,
@@ -663,6 +1027,420 @@ td {
 
 .alert-history-table td strong + small {
   overflow-wrap: anywhere;
+}
+
+.alert-feedback-control {
+  min-width: 250px;
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+}
+
+.alert-feedback-control > div {
+  display: grid;
+  grid-template-columns: minmax(170px, 1fr) 44px;
+  gap: 6px;
+}
+
+.alert-feedback-control select,
+.case-controls select,
+.case-create-form select,
+.allowlist-editor select {
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 8px;
+  background: rgba(8, 17, 31, 0.8);
+  color: #f8fafc;
+  padding: 0 10px;
+  font: inherit;
+}
+
+.alert-feedback-control select:focus-visible,
+.case-controls select:focus-visible,
+.case-create-form select:focus-visible,
+.allowlist-editor select:focus-visible {
+  border-color: #22c55e;
+  outline: 2px solid rgba(34, 197, 94, 0.28);
+}
+
+.case-link-button {
+  min-width: 106px;
+  justify-content: center;
+}
+
+.scan-history {
+  min-width: 0;
+}
+
+.scan-history h3 {
+  margin: 0;
+  font-family: "Fira Code", ui-monospace, monospace;
+  font-size: 1rem;
+}
+
+.scan-history-table {
+  min-width: 1180px;
+}
+
+.radar-operational-overview {
+  min-height: 0;
+}
+
+.compact-tabs {
+  flex: 0 0 auto;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.data-health-content,
+.detection-coverage-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.data-health-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 18px;
+  color: #b9c8dc;
+}
+
+.data-health-summary strong {
+  color: #f8fafc;
+  font-family: "Fira Code", ui-monospace, monospace;
+}
+
+.field-coverage-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 12px 18px;
+}
+
+.field-coverage-row {
+  display: grid;
+  gap: 7px;
+}
+
+.field-coverage-row > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: #b9c8dc;
+  font-size: 0.86rem;
+}
+
+.field-coverage-row strong {
+  color: #f8fafc;
+  font-family: "Fira Code", ui-monospace, monospace;
+}
+
+.coverage-bar {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.16);
+}
+
+.coverage-bar i {
+  display: block;
+  min-width: 2px;
+  height: 100%;
+  border-radius: inherit;
+  background: #22c55e;
+}
+
+.trend-overview {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(130px, 0.5fr));
+  gap: 10px;
+}
+
+.trend-overview > .status {
+  min-height: 70px;
+  box-shadow: none;
+  background: rgba(8, 17, 31, 0.45);
+}
+
+.trend-routes {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid rgba(148, 163, 184, 0.16);
+  padding-top: 13px;
+}
+
+.trend-routes > span {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  color: #b9c8dc;
+}
+
+.trend-routes > span strong {
+  color: #f8fafc;
+}
+
+.detection-coverage-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.1fr) minmax(170px, 0.7fr) minmax(260px, 1.2fr) auto;
+  align-items: center;
+  gap: 14px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+  padding: 0 0 13px;
+}
+
+.detection-coverage-row > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.detection-coverage-row > div:first-child span,
+.detection-coverage-row > span {
+  color: #9fb0c7;
+  font-size: 0.85rem;
+}
+
+.coverage-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.coverage-tags span {
+  border: 1px solid rgba(125, 211, 252, 0.24);
+  border-radius: 4px;
+  background: rgba(14, 165, 233, 0.07);
+  color: #bae6fd;
+  padding: 3px 6px;
+  font: 0.74rem "Fira Code", ui-monospace, monospace;
+}
+
+.detection-pack-version {
+  margin: 0;
+}
+
+.cases-view {
+  grid-template-columns: minmax(300px, 0.78fr) minmax(0, 1.22fr);
+  align-items: start;
+}
+
+.cases-view > .wide {
+  grid-column: 1 / -1;
+}
+
+.case-list-panel,
+.case-detail-panel {
+  min-height: 620px;
+}
+
+.case-create-form,
+.case-note-form,
+.case-summary,
+.case-evidence {
+  display: grid;
+  gap: 12px;
+}
+
+.case-create-form {
+  grid-template-columns: minmax(0, 1fr) minmax(130px, 0.4fr);
+  margin-bottom: 16px;
+}
+
+.case-create-form > .field:nth-of-type(3),
+.case-create-form > button {
+  grid-column: 1 / -1;
+}
+
+.case-create-form > button {
+  justify-self: start;
+}
+
+.case-create-form textarea,
+.case-note-form textarea {
+  min-height: 92px;
+}
+
+.case-list {
+  display: grid;
+  gap: 7px;
+  max-height: 420px;
+  overflow: auto;
+}
+
+.case-list > button {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 6px;
+  background: rgba(8, 17, 31, 0.5);
+  color: #f8fafc;
+  padding: 11px;
+  text-align: left;
+}
+
+.case-list > button:hover,
+.case-list > button:focus-visible,
+.case-list > button.selected {
+  border-color: rgba(34, 197, 94, 0.5);
+  background: rgba(34, 197, 94, 0.1);
+  outline: none;
+}
+
+.case-list > button > span {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.case-list > button > span:first-child {
+  display: grid;
+}
+
+.case-list small {
+  color: #9fb0c7;
+}
+
+.case-controls {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(140px, 1fr));
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.case-summary,
+.case-evidence,
+.case-note-form {
+  border-top: 1px solid rgba(148, 163, 184, 0.16);
+  padding-top: 15px;
+}
+
+.case-summary h3,
+.case-evidence h3,
+.case-note-form h3 {
+  margin: 0;
+  font-family: "Fira Code", ui-monospace, monospace;
+  font-size: 0.94rem;
+}
+
+.case-summary p {
+  margin: 0;
+  color: #cbd5e1;
+}
+
+.case-evidence dl,
+.diagnostic-facts {
+  display: grid;
+  grid-template-columns: minmax(130px, 0.4fr) minmax(0, 1fr);
+  gap: 8px 16px;
+  margin: 0;
+}
+
+.case-evidence dt,
+.diagnostic-facts dt {
+  color: #9fb0c7;
+}
+
+.case-evidence dd,
+.diagnostic-facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.case-note-form > div {
+  display: grid;
+  grid-template-columns: minmax(130px, 0.35fr) minmax(0, 1fr);
+  gap: 10px;
+}
+
+.case-note-form > button {
+  justify-self: start;
+}
+
+.case-notes {
+  display: grid;
+  gap: 9px;
+  margin-top: 14px;
+}
+
+.case-notes article {
+  border-left: 3px solid rgba(34, 197, 94, 0.48);
+  background: rgba(8, 17, 31, 0.42);
+  padding: 10px 12px;
+}
+
+.case-notes article > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.case-notes article span {
+  color: #9fb0c7;
+  font-size: 0.8rem;
+}
+
+.case-notes p {
+  margin: 7px 0 0;
+  color: #dbeafe;
+  white-space: pre-wrap;
+}
+
+.diagnostics-view {
+  align-items: start;
+}
+
+.diagnostics-view > .wide {
+  grid-column: 1 / -1;
+}
+
+.diagnostics-health-panel,
+.diagnostics-service-panel {
+  min-height: 360px;
+}
+
+.diagnostic-field-grid {
+  margin-top: 20px;
+}
+
+.diagnostic-failures {
+  display: grid;
+  gap: 6px;
+  margin-top: 18px;
+  border-top: 1px solid rgba(248, 113, 113, 0.24);
+  padding-top: 12px;
+}
+
+.diagnostic-failures span {
+  color: #fecaca;
+  font-size: 0.84rem;
+  overflow-wrap: anywhere;
+}
+
+.diagnostics-ledger {
+  min-height: 0;
+}
+
+.identity-status {
+  color: #a7b7cd;
+  font-size: 0.72rem;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.identity-status.promoted {
+  color: #fca5a5;
+}
+
+.identity-status.review {
+  color: #fcd34d;
 }
 
 .danger-button,
@@ -1694,6 +2472,40 @@ progress::-moz-progress-bar {
   min-width: 1460px;
 }
 
+.identity-anomaly-table,
+.identity-signal-detail-table {
+  min-width: 1840px;
+}
+
+.identity-stacked-cell {
+  min-width: 180px;
+  display: grid;
+  gap: 3px;
+}
+
+.identity-stacked-cell strong {
+  color: #e2e8f0;
+  font-family: "Fira Code", ui-monospace, monospace;
+  overflow-wrap: anywhere;
+}
+
+.identity-stacked-cell span {
+  color: #9fb0c7;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.identity-time-cell {
+  min-width: 168px;
+  white-space: nowrap;
+}
+
+.identity-evidence-cell {
+  min-width: 300px;
+  max-width: 420px;
+  overflow-wrap: anywhere;
+}
+
 .sortable-table-head {
   width: 100%;
   min-height: 28px;
@@ -2064,6 +2876,18 @@ progress::-moz-progress-bar {
 }
 
 @media (max-width: 1280px) {
+  .allowlist-editor {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .allowlist-editor > button {
+    justify-self: start;
+  }
+
+  .detection-coverage-row {
+    grid-template-columns: minmax(220px, 1fr) minmax(180px, 0.7fr);
+  }
+
   .radar-agent-status {
     flex-direction: column;
     align-items: stretch;
@@ -2079,6 +2903,30 @@ progress::-moz-progress-bar {
 }
 
 @media (max-width: 920px) {
+  .extension-gate {
+    width: min(100% - 24px, 720px);
+    padding-top: 16px;
+  }
+
+  .install-intro,
+  .install-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .install-intro {
+    gap: 22px;
+    padding: 34px 0 26px;
+  }
+
+  .install-section-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .install-download {
+    justify-content: center;
+  }
+
   .allowlist-editor {
     grid-template-columns: 1fr;
   }
@@ -2168,6 +3016,36 @@ progress::-moz-progress-bar {
     flex-direction: column;
   }
 
+  .compact-tabs {
+    width: 100%;
+  }
+
+  .compact-tabs button {
+    flex: 1 1 150px;
+  }
+
+  .trend-overview,
+  .cases-view,
+  .case-controls,
+  .case-create-form,
+  .case-note-form > div,
+  .detection-coverage-row {
+    grid-template-columns: 1fr;
+  }
+
+  .case-create-form > .field:nth-of-type(3),
+  .case-create-form > button,
+  .trend-routes {
+    grid-column: 1;
+  }
+
+  .case-list-panel,
+  .case-detail-panel,
+  .diagnostics-health-panel,
+  .diagnostics-service-panel {
+    min-height: 0;
+  }
+
   .alert-rule-form {
     grid-template-columns: 1fr;
   }
@@ -2192,6 +3070,38 @@ progress::-moz-progress-bar {
   .signal-modal {
     width: 100%;
     max-height: calc(100dvh - 24px);
+  }
+}
+
+@media (max-width: 560px) {
+  .extension-checking {
+    grid-template-columns: auto 1fr;
+  }
+
+  .extension-checking > svg:last-child {
+    display: none;
+  }
+
+  .install-brand {
+    align-items: flex-start;
+  }
+
+  .install-version {
+    max-width: 90px;
+    text-align: right;
+  }
+
+  .install-intro h1 {
+    font-size: 1.6rem;
+  }
+
+  .install-steps li {
+    grid-template-columns: 34px minmax(0, 1fr);
+  }
+
+  .install-steps li > button {
+    grid-column: 2;
+    justify-self: start;
   }
 }
 

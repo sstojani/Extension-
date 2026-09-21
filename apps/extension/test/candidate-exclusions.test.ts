@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isExcludedCandidate } from "../src/candidate-exclusions";
+import { isExcludedCandidate, type CandidateException } from "../src/candidate-exclusions";
 
 describe("candidate exclusions", () => {
   const rules = [
@@ -23,5 +23,31 @@ describe("candidate exclusions", () => {
     expect(isExcludedCandidate({ type: "domain", normalized: "api.trusted.example" }, rules)).toBe(true);
     expect(isExcludedCandidate({ type: "sha256", normalized: "0123456789abcdef" }, rules)).toBe(true);
     expect(isExcludedCandidate({ type: "domain", normalized: "untrusted.example" }, rules)).toBe(false);
+  });
+
+  it("applies structured exceptions only to their configured ECS field", () => {
+    const exceptions: CandidateException[] = [{
+      id: "exception-1",
+      scope: "identity",
+      value: "svc-backup",
+      field: "user.name",
+      enabled: true,
+      createdAt: "2026-09-11T08:00:00.000Z"
+    }];
+    expect(isExcludedCandidate({ type: "identity", values: ["other-user"], fields: { "user.name": "svc-backup" } }, [], exceptions)).toBe(true);
+    expect(isExcludedCandidate({ type: "identity", values: ["svc-backup"], fields: { "user.name": "other-user" } }, [], exceptions)).toBe(false);
+  });
+
+  it("ignores disabled and expired structured exceptions", () => {
+    const base: CandidateException = {
+      id: "exception-2",
+      scope: "ip",
+      value: "198.51.100.0/24",
+      enabled: true,
+      createdAt: "2026-09-11T08:00:00.000Z"
+    };
+    expect(isExcludedCandidate({ ip: "198.51.100.20" }, [], [{ ...base, enabled: false }])).toBe(false);
+    expect(isExcludedCandidate({ ip: "198.51.100.20" }, [], [{ ...base, expiresAt: "2026-09-11T08:30:00.000Z" }], Date.parse("2026-09-11T09:00:00.000Z"))).toBe(false);
+    expect(isExcludedCandidate({ ip: "198.51.100.20" }, [], [{ ...base, expiresAt: "2026-09-11T09:30:00.000Z" }], Date.parse("2026-09-11T09:00:00.000Z"))).toBe(true);
   });
 });

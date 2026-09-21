@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildThreatRadarBody, buildThreatRadarEntityDetailBody, buildThreatRadarStageBodies, calculateGtiBoost, classifyGtiReputation, isConfirmedSuspiciousFinding, isInvestigationCandidate, parseGtiReputationResponse, type GtiIpReputation, type ThreatRadarFinding } from "../src/kibana";
+import { buildThreatRadarBody, buildThreatRadarEntityDetailBody, buildThreatRadarStageBodies, calculateGtiBoost, classifyGtiReputation, isConfirmedSuspiciousFinding, isConfirmedSuspiciousIndicator, isInvestigationCandidate, parseGtiReputationResponse, summarizeThreatRadarEntities, summarizeThreatRadarIndicators, type GtiIpReputation, type ThreatRadarFinding, type ThreatRadarIndicator } from "../src/kibana";
 
 type EnrichedFinding = ThreatRadarFinding & { gti?: GtiIpReputation };
 
@@ -11,6 +11,7 @@ function finding(overrides: Partial<EnrichedFinding> = {}): EnrichedFinding {
     gtiIp: "--",
     role: "source",
     direction: "internal",
+    evidenceScope: "entity",
     score: 90,
     severity: "critical",
     events: 900,
@@ -24,6 +25,7 @@ function finding(overrides: Partial<EnrichedFinding> = {}): EnrichedFinding {
     deniedEvents: 700,
     successfulEvents: 0,
     outboundEvents: 0,
+    outboundBytes: 0,
     suspiciousKeywordHits: 0,
     matchedKeywords: [],
     signalCounts: {},
@@ -39,6 +41,36 @@ function finding(overrides: Partial<EnrichedFinding> = {}): EnrichedFinding {
       message: undefined
     },
     reasons: ["High log volume"],
+    ...overrides
+  };
+}
+
+function indicator(overrides: Partial<ThreatRadarIndicator> = {}): ThreatRadarIndicator {
+  return {
+    value: "example.test",
+    type: "domain",
+    score: 40,
+    severity: "medium",
+    events: 50,
+    infrastructureCount: 1,
+    deniedEvents: 20,
+    suspiciousKeywordHits: 3,
+    matchedKeywords: ["malware"],
+    signalCounts: { malware: 3 },
+    actions: [],
+    datasets: [],
+    latest: {
+      timestamp: undefined,
+      sourceIp: undefined,
+      destinationIp: undefined,
+      clientIp: undefined,
+      serverIp: undefined,
+      destinationPort: undefined,
+      action: undefined,
+      host: undefined,
+      message: undefined
+    },
+    reasons: ["Signals: Malware"],
     ...overrides
   };
 }
@@ -70,6 +102,7 @@ describe("Threat Radar query generation", () => {
     expect(serialized).toContain("event.outcome");
     expect(serialized).toContain("outbound_events");
     expect(serialized).toContain("security_signals");
+    expect(serialized).toContain('"1.1.1.1"');
     expect(serialized).toContain('"denied"');
     expect(serialized).toContain("brute_force");
     expect(serialized).toContain("command_control");
@@ -94,11 +127,12 @@ describe("Threat Radar query generation", () => {
       size: 20
     });
 
-    expect(stages.map((stage) => stage.key)).toEqual(["signals", "sources", "destinations", "indicators"]);
+    expect(stages.map((stage) => stage.key)).toEqual(["signals", "sources", "destinations", "indicators", "identities"]);
     expect(Object.keys(stages[0]?.body.aggs ?? {})).toEqual(["security_signals"]);
     expect(Object.keys(stages[1]?.body.aggs ?? {})).toEqual(["source_entities"]);
     expect(Object.keys(stages[2]?.body.aggs ?? {})).toEqual(["destination_entities"]);
     expect(Object.keys(stages[3]?.body.aggs ?? {})).toHaveLength(6);
+    expect(Object.keys(stages[4]?.body.aggs ?? {})).toHaveLength(13);
     expect(stages[1]?.body.aggs.source_entities).toHaveProperty("aggs.denied");
     expect(stages[1]?.body.aggs.source_entities).toHaveProperty("aggs.risky_auth_success");
     expect(stages[1]?.body.aggs.source_entities).toHaveProperty("aggs.risky_ports");
@@ -119,6 +153,8 @@ describe("Threat Radar query generation", () => {
     expect(detail.aggs.source_entities).toHaveProperty("aggs.denied_events.filter");
     expect(detail.aggs.source_entities).toHaveProperty("aggs.authentication_successes.filter");
     expect(detail.aggs.source_entities).toHaveProperty("aggs.threat_signals.filters");
+    expect(detail.aggs.source_entities).toHaveProperty("aggs.outbound_events.aggs.peer_values.aggs.source_bytes");
+    expect(detail.aggs.source_entities).toHaveProperty("aggs.outbound_events.aggs.peer_values.aggs.network_bytes");
     expect(detail.aggs.source_entities).toHaveProperty("terms.size", 2);
   });
 
@@ -150,6 +186,7 @@ describe("Threat Radar query generation", () => {
       destinationIp: "1.1.1.1",
       gtiIp: "1.1.1.1",
       direction: "outbound",
+      evidenceScope: "source_destination",
       outboundEvents: 3271,
       deniedEvents: 443,
       destinationPorts: 6,
@@ -172,6 +209,7 @@ describe("Threat Radar query generation", () => {
       destinationIp: "185.220.101.24",
       gtiIp: "185.220.101.24",
       direction: "outbound",
+      evidenceScope: "source_destination",
       outboundEvents: 80,
       deniedEvents: 30,
       destinationPorts: 5,
@@ -221,12 +259,195 @@ describe("Threat Radar query generation", () => {
       destinationIp: "203.0.113.80",
       gtiIp: "203.0.113.80",
       direction: "outbound",
+      evidenceScope: "source_destination",
       outboundEvents: 8,
       deniedEvents: 0,
       destinationPorts: 1,
       relatedHosts: 1,
       dangerousPorts: []
     }))).toBe(false);
+  });
+
+  it("keeps private outbound evidence isolated to each exact destination", () => {
+    const results = summarizeThreatRadarEntities({
+      aggregations: {
+        source_entities: {
+          buckets: [{
+            key: "192.168.1.20",
+            doc_count: 1000,
+            outbound_events: {
+              peer_values: {
+                buckets: [
+                  {
+                    key: "1.1.1.1",
+                    doc_count: 900,
+                    infrastructure: { value: 2 },
+                    destination_ports: { value: 1 },
+                    ports: { buckets: [{ key: 53, doc_count: 900 }] },
+                    actions: { buckets: [{ key: "dns_query", doc_count: 900 }] },
+                    outcomes: { buckets: [{ key: "success", doc_count: 900 }] },
+                    categories: { buckets: [{ key: "network", doc_count: 900 }] },
+                    datasets: { buckets: [{ key: "dns", doc_count: 900 }] },
+                    denied_events: { doc_count: 0 },
+                    authentication_successes: { doc_count: 0 },
+                    source_bytes: { value: 12000 },
+                    network_bytes: { value: 18000 },
+                    threat_signals: { buckets: { exfiltration: { doc_count: 0 } } },
+                    latest: { hits: { hits: [] } }
+                  },
+                  {
+                    key: "203.0.113.90",
+                    doc_count: 40,
+                    infrastructure: { value: 1 },
+                    destination_ports: { value: 1 },
+                    ports: { buckets: [{ key: 4444, doc_count: 40 }] },
+                    actions: { buckets: [{ key: "connection_failed", doc_count: 35 }] },
+                    outcomes: { buckets: [{ key: "failure", doc_count: 35 }] },
+                    categories: { buckets: [{ key: "network", doc_count: 40 }] },
+                    datasets: { buckets: [{ key: "firewall", doc_count: 40 }] },
+                    denied_events: { doc_count: 35 },
+                    authentication_successes: { doc_count: 0 },
+                    source_bytes: { value: 5000 },
+                    network_bytes: { value: 8000 },
+                    threat_signals: { buckets: { command_control: { doc_count: 4 } } },
+                    latest: { hits: { hits: [] } }
+                  }
+                ]
+              }
+            }
+          }]
+        }
+      }
+    }, "source_entities", "source");
+
+    expect(results).toHaveLength(2);
+    expect(results[0]).toMatchObject({
+      sourceIp: "192.168.1.20",
+      destinationIp: "1.1.1.1",
+      evidenceScope: "source_destination",
+      events: 900,
+      topPorts: [53],
+      deniedEvents: 0,
+      outboundBytes: 18000,
+      matchedKeywords: []
+    });
+    expect(results[1]).toMatchObject({
+      sourceIp: "192.168.1.20",
+      destinationIp: "203.0.113.90",
+      evidenceScope: "source_destination",
+      events: 40,
+      topPorts: [4444],
+      deniedEvents: 35,
+      matchedKeywords: ["command_control"]
+    });
+  });
+
+  it("keeps rare domains selected by a threat-signal lane even when absent from the volume lane", () => {
+    const indicators = summarizeThreatRadarIndicators({
+      aggregations: {
+        dns_domain_entities: { buckets: [] },
+        security_signals: {
+          buckets: {
+            malware: {
+              dns_domain_entities: { buckets: [{ key: "rare-signal.example", doc_count: 2 }] }
+            }
+          }
+        }
+      }
+    }, "dns_domain_entities", "domain");
+
+    expect(indicators).toHaveLength(1);
+    expect(indicators[0]).toMatchObject({
+      value: "rare-signal.example",
+      events: 2,
+      matchedKeywords: ["malware"]
+    });
+  });
+
+  it("does not promote clean high-volume outbound traffic as exfiltration without supported evidence", () => {
+    expect(isConfirmedSuspiciousFinding(finding({
+      destinationIp: "1.1.1.1",
+      gtiIp: "1.1.1.1",
+      direction: "outbound",
+      evidenceScope: "source_destination",
+      events: 22000,
+      outboundEvents: 22000,
+      outboundBytes: 50 * 1024 * 1024,
+      matchedKeywords: [],
+      suspiciousKeywordHits: 0,
+      signalCounts: {},
+      gti: {
+        verdict: "VERDICT_BENIGN",
+        threatScore: 0,
+        malicious: 0,
+        suspicious: 0,
+        reputation: 0,
+        asn: 13335
+      }
+    }))).toBe(false);
+  });
+
+  it("does not turn a clean public resolver into an exfiltration endpoint on nonstandard port fan-out", () => {
+    expect(isConfirmedSuspiciousFinding(finding({
+      destinationIp: "8.8.8.8",
+      gtiIp: "8.8.8.8",
+      direction: "outbound",
+      evidenceScope: "source_destination",
+      events: 19065,
+      outboundEvents: 19065,
+      outboundBytes: 200 * 1024 * 1024,
+      topPorts: [443, 53, 161, 1900, 5985, 80],
+      destinationPorts: 6,
+      matchedKeywords: ["exfiltration"],
+      suspiciousKeywordHits: 4,
+      signalCounts: { exfiltration: 4 },
+      gti: {
+        verdict: "VERDICT_BENIGN",
+        threatScore: 0,
+        malicious: 0,
+        suspicious: 0,
+        reputation: 0,
+        asn: 15169
+      }
+    }))).toBe(false);
+  });
+
+  it("does not queue a clean public resolver merely because normal replies fan out", () => {
+    expect(isInvestigationCandidate(finding({
+      ip: "8.8.8.8",
+      sourceIp: "8.8.8.8",
+      gtiIp: "8.8.8.8",
+      direction: "inbound",
+      events: 12000,
+      relatedHosts: 40,
+      destinationPorts: 80,
+      deniedEvents: 0,
+      matchedKeywords: [],
+      signalCounts: {},
+      gti: {
+        verdict: "VERDICT_BENIGN",
+        threatScore: 0,
+        malicious: 0,
+        suspicious: 0,
+        reputation: 0,
+        asn: 15169
+      }
+    }))).toBe(false);
+  });
+
+  it("promotes exact outbound exfiltration only when corroborated by transfer and explicit signals", () => {
+    expect(isConfirmedSuspiciousFinding(finding({
+      destinationIp: "203.0.113.91",
+      gtiIp: "203.0.113.91",
+      direction: "outbound",
+      evidenceScope: "source_destination",
+      events: 80,
+      outboundEvents: 80,
+      outboundBytes: 50 * 1024 * 1024,
+      matchedKeywords: ["exfiltration"],
+      suspiciousKeywordHits: 3,
+      signalCounts: { exfiltration: 3 }
+    }))).toBe(true);
   });
 
   it("promotes a public source attacking SSH across many infrastructures", () => {
@@ -296,5 +517,35 @@ describe("Threat Radar query generation", () => {
       reputation: 0,
       asn: 15169
     })).toBe("Clean");
+  });
+
+  it("does not confirm a clean domain merely because log text carried a threat label", () => {
+    expect(isConfirmedSuspiciousIndicator(indicator({
+      matchedKeywords: [],
+      suspiciousKeywordHits: 0,
+      gti: {
+        verdict: "VERDICT_BENIGN",
+        threatScore: 0,
+        malicious: 0,
+        suspicious: 0,
+        reputation: 0,
+        asn: 0
+      }
+    }))).toBe(false);
+  });
+
+  it("ranks an adversely scored domain as a confirmed IOC even when it is new to text rules", () => {
+    expect(isConfirmedSuspiciousIndicator(indicator({
+      matchedKeywords: [],
+      suspiciousKeywordHits: 0,
+      gti: {
+        verdict: "VERDICT_SUSPICIOUS",
+        threatScore: 35,
+        malicious: 1,
+        suspicious: 2,
+        reputation: -5,
+        asn: 64500
+      }
+    }))).toBe(true);
   });
 });

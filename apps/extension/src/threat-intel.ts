@@ -11,21 +11,21 @@ export interface ThreatIntelProviderStatus {
 export interface ThreatIntelIOC extends ClassifiedIOC {
   sources: string[];
   sourceCount: number;
-  malware?: string;
-  threatType?: string;
-  confidence?: number;
-  firstSeen?: string;
-  reference?: string;
+  malware?: string | undefined;
+  threatType?: string | undefined;
+  confidence?: number | undefined;
+  firstSeen?: string | undefined;
+  reference?: string | undefined;
 }
 
 interface RawIntelIOC {
   value: string;
   source: string;
-  malware?: string;
-  threatType?: string;
-  confidence?: number;
-  firstSeen?: string;
-  reference?: string;
+  malware?: string | undefined;
+  threatType?: string | undefined;
+  confidence?: number | undefined;
+  firstSeen?: string | undefined;
+  reference?: string | undefined;
 }
 
 type Collector = () => Promise<RawIntelIOC[]>;
@@ -280,9 +280,11 @@ function earliest(left: string | undefined, right: string | undefined): string |
 
 async function readProviderKeys(): Promise<{ threatFoxAuthKey?: string; malwareBazaarAuthKey?: string }> {
   const stored = await chrome.storage.local.get(["threatFoxAuthKey", "malwareBazaarAuthKey"]);
+  const threatFoxAuthKey = readStoredKey(stored.threatFoxAuthKey);
+  const malwareBazaarAuthKey = readStoredKey(stored.malwareBazaarAuthKey);
   return {
-    threatFoxAuthKey: readStoredKey(stored.threatFoxAuthKey),
-    malwareBazaarAuthKey: readStoredKey(stored.malwareBazaarAuthKey)
+    ...(threatFoxAuthKey ? { threatFoxAuthKey } : {}),
+    ...(malwareBazaarAuthKey ? { malwareBazaarAuthKey } : {})
   };
 }
 

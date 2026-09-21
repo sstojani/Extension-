@@ -19,7 +19,18 @@ import {
 import { classifyIOC } from "@soc-watch/ioc";
 import { DEFAULT_KIBANA_BASE_URL, DEFAULT_SPACE_ID } from "./config";
 import { buildIOCBulkSearchBody, buildIOCSearchBody } from "./search";
-import { isExcludedCandidate } from "./candidate-exclusions";
+import { isExcludedCandidate, type CandidateException } from "./candidate-exclusions";
+import { buildDetectionCoverage, DETECTION_PACK_VERSION } from "./detection-packs";
+import {
+  assessIdentityObservations,
+  classifyIdentityValue,
+  normalizeReputationDomain,
+  normalizeReputationHash,
+  type IdentityAnomaly,
+  type IdentityBaseline,
+  type IdentityObservation
+} from "./identity-analysis";
+import { getKnownInfrastructure, isRoutineKnownInfrastructureTraffic, KNOWN_PUBLIC_DNS_IPS } from "./known-infrastructure";
 
 export class BridgeOperationError extends Error {
   constructor(
@@ -37,18 +48,18 @@ export interface KibanaRuntimeConfig {
 }
 
 export interface GtiIpReputation {
-  verdict?: string;
-  severity?: string;
+  verdict?: string | undefined;
+  severity?: string | undefined;
   threatScore: number;
   malicious: number;
   suspicious: number;
-  harmless?: number;
-  undetected?: number;
-  totalEngines?: number;
+  harmless?: number | undefined;
+  undetected?: number | undefined;
+  totalEngines?: number | undefined;
   reputation: number;
-  country?: string;
+  country?: string | undefined;
   asn: number;
-  asOwner?: string;
+  asOwner?: string | undefined;
 }
 
 export type GtiLookupStatus =
@@ -88,6 +99,8 @@ export interface ThreatRadarIndicator extends GtiEnrichmentState {
   reasons: string[];
 }
 
+export type ThreatRadarIdentityAnomaly = IdentityAnomaly;
+
 export interface ThreatRadarFinding extends GtiEnrichmentState {
   ip: string;
   sourceIp: string;
@@ -95,6 +108,7 @@ export interface ThreatRadarFinding extends GtiEnrichmentState {
   gtiIp: string;
   role: ThreatRadarRole;
   direction: ThreatRadarDirection;
+  evidenceScope: "entity" | "source_destination";
   score: number;
   severity: ThreatRadarSeverity;
   events: number;
@@ -108,6 +122,7 @@ export interface ThreatRadarFinding extends GtiEnrichmentState {
   deniedEvents: number;
   successfulEvents: number;
   outboundEvents: number;
+  outboundBytes: number;
   suspiciousKeywordHits: number;
   matchedKeywords: string[];
   signalCounts: Record<string, number>;
@@ -122,7 +137,25 @@ export interface GtiCoverageSummary {
   cached: number;
   pending: number;
   rateLimited: number;
+  notFound: number;
+  unauthorized: number;
+  unavailable: number;
   failed: number;
+  failureReasons: Array<{ message: string; count: number }>;
+}
+
+export interface ThreatRadarDataHealth {
+  status: "healthy" | "partial" | "unavailable";
+  indexPattern: string;
+  from: string;
+  to: string;
+  events: number;
+  exactEventCount: boolean;
+  fields: Array<{ key: string; label: string; coverage: number; events: number }>;
+  completedStages: string[];
+  skippedStages: string[];
+  tookMs?: number;
+  message?: string;
 }
 
 type ThreatRadarSearchBody = {
@@ -180,7 +213,7 @@ export async function listFleetAgents(params: unknown): Promise<{ items: Sanitiz
   const items = Array.isArray(record.items) ? record.items.map(sanitizeFleetAgent) : [];
   return {
     items,
-    total: typeof record.total === "number" ? record.total : undefined,
+    ...(typeof record.total === "number" ? { total: record.total } : {}),
     page: parsed.page,
     perPage: parsed.perPage
   };
@@ -231,9 +264,9 @@ export async function listDataViews(): Promise<DataViewSummary[]> {
     const item = asRecord(view);
     return {
       id: String(item.id ?? ""),
-      name: typeof item.name === "string" ? item.name : undefined,
+      ...(typeof item.name === "string" ? { name: item.name } : {}),
       title: String(item.title ?? ""),
-      timeFieldName: typeof item.timeFieldName === "string" ? item.timeFieldName : undefined
+      ...(typeof item.timeFieldName === "string" ? { timeFieldName: item.timeFieldName } : {})
     };
   }).filter((view) => view.id && view.title);
 }
@@ -301,10 +334,12 @@ export async function analyzeThreatRadar(params: unknown) {
         skippedStages: []
       };
   const raw = searchResult.raw;
+  const dataHealth = await readThreatRadarDataHealth(config, parsed, searchResult);
   const stored = await chrome.storage.local.get(["googleThreatIntelApiKey", "threatRadarAgentConfig"]);
   const gtiApiKey = typeof stored.googleThreatIntelApiKey === "string" ? stored.googleThreatIntelApiKey.trim() : "";
   const agentConfig = threatRadarAgentConfigSchema.parse(stored.threatRadarAgentConfig ?? {});
-  const enrichmentPoolSize = Math.min(40, Math.max(parsed.size * 2, 30));
+  const enrichmentPoolSize = Math.min(100, Math.max(parsed.size * 4, 60));
+  const indicatorPoolSize = Math.min(120, Math.max(parsed.size * 4, 80));
   const externalSources = rankThreatRadarFindings([
     ...summarizeThreatRadarEntities(raw, "source_entities", "source"),
     ...summarizeThreatRadarEntities(raw, "client_entities", "source")
@@ -313,8 +348,15 @@ export async function analyzeThreatRadar(params: unknown) {
     sourceIp: finding.sourceIp,
     destinationIp: finding.destinationIp,
     values: [...finding.actions.map((action) => action.key), ...finding.datasets.map((dataset) => dataset.key)],
-    text: `${finding.latest?.message ?? ""} ${finding.reasons.join(" ")}`
-  }, agentConfig.candidateExclusions)), enrichmentPoolSize);
+    text: `${finding.latest?.message ?? ""} ${finding.reasons.join(" ")}`,
+    fields: {
+      "source.ip": finding.sourceIp,
+      "destination.ip": finding.destinationIp,
+      "host.name": finding.latest?.host,
+      "event.action": finding.actions.map((action) => action.key),
+      "data_stream.dataset": finding.datasets.map((dataset) => dataset.key)
+    }
+  }, agentConfig.candidateExclusions, agentConfig.candidateExceptions)), enrichmentPoolSize);
   const suspiciousDestinations = rankThreatRadarFindings([
     ...summarizeThreatRadarEntities(raw, "destination_entities", "destination"),
     ...summarizeThreatRadarEntities(raw, "server_entities", "destination")
@@ -323,8 +365,15 @@ export async function analyzeThreatRadar(params: unknown) {
     sourceIp: finding.sourceIp,
     destinationIp: finding.destinationIp,
     values: [...finding.actions.map((action) => action.key), ...finding.datasets.map((dataset) => dataset.key)],
-    text: `${finding.latest?.message ?? ""} ${finding.reasons.join(" ")}`
-  }, agentConfig.candidateExclusions)), enrichmentPoolSize);
+    text: `${finding.latest?.message ?? ""} ${finding.reasons.join(" ")}`,
+    fields: {
+      "source.ip": finding.sourceIp,
+      "destination.ip": finding.destinationIp,
+      "host.name": finding.latest?.host,
+      "event.action": finding.actions.map((action) => action.key),
+      "data_stream.dataset": finding.datasets.map((dataset) => dataset.key)
+    }
+  }, agentConfig.candidateExclusions, agentConfig.candidateExceptions)), enrichmentPoolSize);
   const suspects = [...externalSources, ...suspiciousDestinations]
     .sort((left, right) => right.score - left.score || right.events - left.events)
     .slice(0, enrichmentPoolSize);
@@ -339,19 +388,39 @@ export async function analyzeThreatRadar(params: unknown) {
       .filter(isInvestigationCandidate),
     parsed.size
   );
-  const indicatorCandidates = rankThreatRadarIndicators([
+  const domainIndicators = [
     ...summarizeThreatRadarIndicators(raw, "dns_domain_entities", "domain"),
     ...summarizeThreatRadarIndicators(raw, "url_domain_entities", "domain"),
-    ...summarizeThreatRadarIndicators(raw, "destination_domain_entities", "domain"),
+    ...summarizeThreatRadarIndicators(raw, "destination_domain_entities", "domain")
+  ];
+  const assessedIdentities = await analyzeThreatRadarIdentities(raw, indicatorPoolSize, agentConfig.candidateExclusions, agentConfig.candidateExceptions);
+  const identityAnomalies = assessedIdentities.filter((item) => item.promoted).slice(0, parsed.size);
+  const reputationDomainIndicators = domainIndicators.flatMap((indicator) => {
+    const value = normalizeReputationDomain(indicator.value);
+    return value ? [{ ...indicator, value }] : [];
+  });
+  const hashIndicators = [
     ...summarizeThreatRadarIndicators(raw, "sha256_entities", "hash"),
     ...summarizeThreatRadarIndicators(raw, "sha1_entities", "hash"),
     ...summarizeThreatRadarIndicators(raw, "md5_entities", "hash")
+  ].flatMap((indicator) => {
+    const value = normalizeReputationHash(indicator.value);
+    return value ? [{ ...indicator, value }] : [];
+  });
+  const indicatorCandidates = rankThreatRadarIndicators([
+    ...reputationDomainIndicators,
+    ...hashIndicators
   ].filter((indicator) => !isExcludedCandidate({
     type: indicator.type === "hash" ? "sha256" : "domain",
     normalized: indicator.value,
     values: [...indicator.actions.map((action) => action.key), ...indicator.datasets.map((dataset) => dataset.key)],
-    text: `${indicator.latest?.message ?? ""} ${indicator.reasons.join(" ")}`
-  }, agentConfig.candidateExclusions)), parsed.size);
+    text: `${indicator.latest?.message ?? ""} ${indicator.reasons.join(" ")}`,
+    fields: {
+      "event.action": indicator.actions.map((action) => action.key),
+      "data_stream.dataset": indicator.datasets.map((dataset) => dataset.key),
+      "host.name": indicator.latest?.host
+    }
+  }, agentConfig.candidateExclusions, agentConfig.candidateExceptions)), indicatorPoolSize);
   const assessedIndicators = (await enrichThreatRadarIndicators(indicatorCandidates, gtiApiKey))
     .map(removeUnsupportedIndicatorLabels);
   const suspiciousIndicators = rankThreatRadarIndicators(
@@ -365,6 +434,15 @@ export async function analyzeThreatRadar(params: unknown) {
     .filter((item) => item.role === "source" && item.direction === "inbound" && isPublicIp(item.ip) && item.deniedEvents > 0)
     .sort((left, right) => right.deniedEvents - left.deniedEvents || right.score - left.score);
   const reputation = summarizeGtiCoverage([...assessed, ...assessedIndicators], Boolean(gtiApiKey));
+  const signals = summarizeDetectionSignals(enriched, suspiciousIndicators, identityAnomalies);
+  const detectionCoverage = buildDetectionCoverage(
+    signals,
+    suspiciousIndicators.length,
+    identityAnomalies.length,
+    suspiciousOutbound.length,
+    deniedActivity.length,
+    enriched.filter((item) => item.dangerousPorts.length > 0).length
+  );
   return {
     from: parsed.from,
     to: parsed.to,
@@ -377,23 +455,39 @@ export async function analyzeThreatRadar(params: unknown) {
     deniedActivity,
     reviewCandidates,
     suspiciousIndicators,
-    signals: summarizeDetectionSignals(enriched, suspiciousIndicators),
+    identityAnomalies,
+    signals,
     gtiEnabled: Boolean(gtiApiKey),
     analysis: {
       strategy: searchResult.strategy,
       partial: searchResult.skippedStages.length > 0,
       completedStages: searchResult.completedStages,
       skippedStages: searchResult.skippedStages,
-      candidatesEvaluated: suspects.length,
-      candidatesForReview: reviewCandidates.length,
+      candidatesEvaluated: suspects.length + assessedIndicators.length + assessedIdentities.length,
+      ipCandidatesEvaluated: suspects.length,
+      indicatorCandidatesEvaluated: assessedIndicators.length,
+      identityCandidatesEvaluated: assessedIdentities.length,
+      candidatesForReview: reviewCandidates.length + assessedIdentities.filter((item) => !item.promoted).length,
       reputation,
-      candidateMethods: ["threat signals", "denied activity", "risky authentication", "risky ports", "traffic volume"]
+      dataHealth,
+      detectionPackVersion: DETECTION_PACK_VERSION,
+      detectionCoverage,
+      candidateMethods: [
+        "exact source-destination correlation",
+        "threat-signal lanes",
+        "denied activity",
+        "risky authentication",
+        "identity baselines",
+        "known-infrastructure context",
+        "risky ports",
+        "traffic volume"
+      ]
     },
     summary: {
-      suspects: enriched.length,
-      critical: enriched.filter((item) => item.severity === "critical").length,
-      high: enriched.filter((item) => item.severity === "high").length,
-      medium: enriched.filter((item) => item.severity === "medium").length
+      suspects: enriched.length + identityAnomalies.filter((item) => item.promoted).length,
+      critical: enriched.filter((item) => item.severity === "critical").length + identityAnomalies.filter((item) => item.promoted && item.severity === "critical").length,
+      high: enriched.filter((item) => item.severity === "high").length + identityAnomalies.filter((item) => item.promoted && item.severity === "high").length,
+      medium: enriched.filter((item) => item.severity === "medium").length + identityAnomalies.filter((item) => item.promoted && item.severity === "medium").length
     }
   };
 }
@@ -408,6 +502,76 @@ async function runThreatRadarSearch(config: KibanaRuntimeConfig, indexPattern: s
     method: "POST",
     body: JSON.stringify(body)
   });
+}
+
+async function readThreatRadarDataHealth(
+  config: KibanaRuntimeConfig,
+  params: { indexPattern: string; timestampField: string; from: string; to: string },
+  searchResult: ThreatRadarSearchResult
+): Promise<ThreatRadarDataHealth> {
+  try {
+    const raw = await runThreatRadarSearch(config, params.indexPattern, buildThreatRadarDataHealthBody(params));
+    const total = readSearchTotal(raw);
+    const buckets = asRecord(asRecord(asRecord(raw).aggregations).field_coverage).buckets;
+    const coverageBuckets = asRecord(buckets);
+    const fields = buildDataHealthFieldDefinitions(params.timestampField).map((definition) => {
+      const events = readNumber(asRecord(coverageBuckets[definition.key]).doc_count);
+      return {
+        key: definition.key,
+        label: definition.label,
+        events,
+        coverage: total > 0 ? Math.round((events / total) * 1000) / 10 : 0
+      };
+    });
+    const timedOut = asRecord(raw).timed_out === true;
+    const partial = timedOut || searchResult.skippedStages.length > 0;
+    return {
+      status: partial ? "partial" : "healthy",
+      indexPattern: params.indexPattern,
+      from: params.from,
+      to: params.to,
+      events: total,
+      exactEventCount: asRecord(asRecord(asRecord(raw).hits).total).relation !== "gte",
+      fields,
+      completedStages: searchResult.completedStages,
+      skippedStages: searchResult.skippedStages,
+      tookMs: readNumber(asRecord(raw).took),
+      ...(timedOut ? { message: "Elasticsearch timed out while measuring field coverage." } : {})
+    };
+  } catch (error) {
+    return {
+      status: "unavailable",
+      indexPattern: params.indexPattern,
+      from: params.from,
+      to: params.to,
+      events: 0,
+      exactEventCount: false,
+      fields: [],
+      completedStages: searchResult.completedStages,
+      skippedStages: searchResult.skippedStages,
+      message: error instanceof Error ? error.message : "Data-health query failed."
+    };
+  }
+}
+
+function buildThreatRadarDataHealthBody(params: { timestampField: string; from: string; to: string }): ThreatRadarSearchBody {
+  return {
+    size: 0,
+    track_total_hits: true,
+    timeout: params.from === "now/d" ? "20s" : "10s",
+    query: {
+      bool: {
+        filter: [{ range: { [params.timestampField]: { gte: params.from, lte: params.to } } }]
+      }
+    },
+    aggs: {
+      field_coverage: {
+        filters: {
+          filters: Object.fromEntries(buildDataHealthFieldDefinitions(params.timestampField).map((definition) => [definition.key, definition.filter]))
+        }
+      }
+    }
+  };
 }
 
 async function runStagedThreatRadarSearch(
@@ -515,7 +679,7 @@ function mergeThreatRadarSearchMetadata(target: Record<string, unknown>, source:
   const sourceRecord = asRecord(source);
   const aggregation = asRecord(asRecord(sourceRecord.aggregations)[aggregationName]);
   const buckets = Array.isArray(asRecord(aggregation.volume).buckets) ? asRecord(aggregation.volume).buckets as unknown[] : [];
-  const candidateEventTotal = buckets.reduce((total, bucket) => total + readNumber(asRecord(bucket).doc_count), 0);
+  const candidateEventTotal = buckets.reduce<number>((total, bucket) => total + readNumber(asRecord(bucket).doc_count), 0);
   const sourceTotal = Math.max(readSearchTotal(source), candidateEventTotal);
   const targetTotal = readSearchTotal(target);
   if (sourceTotal > targetTotal) {
@@ -550,8 +714,8 @@ export function buildThreatRadarBody(params: { timestampField: string; from: str
     ? Math.max(32, Math.min(50, params.size * 2))
     : Math.max(80, params.size * 2);
   const indicatorLimit = wideWindow
-    ? Math.max(20, Math.min(30, params.size))
-    : Math.max(40, params.size);
+    ? Math.max(80, Math.min(160, params.size * 4))
+    : Math.max(100, Math.min(200, params.size * 4));
   return {
     size: 0,
     track_total_hits: true,
@@ -579,7 +743,8 @@ export function buildThreatRadarBody(params: { timestampField: string; from: str
                 { exists: { field: "destination.domain" } },
                 { exists: { field: "file.hash.sha256" } },
                 { exists: { field: "file.hash.sha1" } },
-                { exists: { field: "file.hash.md5" } }
+                { exists: { field: "file.hash.md5" } },
+                ...THREAT_IDENTITY_FIELDS.map(({ field }) => ({ exists: { field } }))
               ],
               minimum_should_match: 1
             }
@@ -588,10 +753,10 @@ export function buildThreatRadarBody(params: { timestampField: string; from: str
       }
     },
     aggs: {
-      source_entities: buildThreatEntityAggregation("source.ip", "destination.ip", params.timestampField, entityLimit),
+      source_entities: buildThreatEntityAggregation("source.ip", "destination.ip", params.timestampField, entityLimit, true),
       destination_entities: buildThreatEntityAggregation("destination.ip", "source.ip", params.timestampField, entityLimit),
       ...(wideWindow ? {} : {
-        client_entities: buildThreatEntityAggregation("client.ip", "server.ip", params.timestampField, entityLimit),
+        client_entities: buildThreatEntityAggregation("client.ip", "server.ip", params.timestampField, entityLimit, true),
         server_entities: buildThreatEntityAggregation("server.ip", "client.ip", params.timestampField, entityLimit)
       }),
       dns_domain_entities: buildThreatIndicatorAggregation("dns.question.name", params.timestampField, indicatorLimit),
@@ -600,6 +765,10 @@ export function buildThreatRadarBody(params: { timestampField: string; from: str
       sha256_entities: buildThreatIndicatorAggregation("file.hash.sha256", params.timestampField, indicatorLimit),
       sha1_entities: buildThreatIndicatorAggregation("file.hash.sha1", params.timestampField, indicatorLimit),
       md5_entities: buildThreatIndicatorAggregation("file.hash.md5", params.timestampField, indicatorLimit),
+      ...Object.fromEntries(THREAT_IDENTITY_FIELDS.map(({ aggregation, field }) => [
+        aggregation,
+        buildThreatIdentityAggregation(field, params.timestampField, indicatorLimit)
+      ])),
       security_signals: buildSecuritySignalAggregation(entityLimit, indicatorLimit)
     }
   };
@@ -618,9 +787,11 @@ export function buildThreatRadarStageBodies(params: { timestampField: string; fr
     "destination.domain",
     "file.hash.sha256",
     "file.hash.sha1",
-    "file.hash.md5"
+    "file.hash.md5",
+    ...THREAT_IDENTITY_FIELDS.map(({ field }) => field)
   ];
-  const indicatorFields = allEvidenceFields.slice(4);
+  const indicatorFields = ["dns.question.name", "url.domain", "destination.domain", "file.hash.sha256", "file.hash.sha1", "file.hash.md5"];
+  const identityFields = THREAT_IDENTITY_FIELDS.map(({ field }) => field);
 
   const buildStage = (
     key: string,
@@ -662,14 +833,14 @@ export function buildThreatRadarStageBodies(params: { timestampField: string; fr
   const sourceCandidateFilter = {
     bool: {
       filter: [{ exists: { field: "source.ip" } }],
-      should: [buildPublicIpFilter("source.ip"), buildPublicIpFilter("destination.ip")],
+      should: [buildPublicIpFilter("source.ip"), buildPublicIpFilter("destination.ip", KNOWN_PUBLIC_DNS_IPS)],
       minimum_should_match: 1
     }
   };
   const destinationCandidateFilter = {
     bool: {
       filter: [{ exists: { field: "destination.ip" } }],
-      should: [buildPublicIpFilter("destination.ip"), buildPublicIpFilter("source.ip")],
+      should: [buildPublicIpFilter("destination.ip", KNOWN_PUBLIC_DNS_IPS), buildPublicIpFilter("source.ip")],
       minimum_should_match: 1
     }
   };
@@ -699,7 +870,13 @@ export function buildThreatRadarStageBodies(params: { timestampField: string; fr
       "sha256_entities",
       "sha1_entities",
       "md5_entities"
-    ], indicatorFields)
+    ], indicatorFields),
+    buildStage(
+      "identities",
+      "identity and authentication activity",
+      THREAT_IDENTITY_FIELDS.map(({ aggregation }) => aggregation),
+      identityFields
+    )
   ];
 }
 
@@ -777,6 +954,41 @@ const RISKY_DESTINATION_PORTS = [
   1433, 1521, 2049, 3306, 3389, 5432, 5900, 5985, 5986, 6379, 8080, 8443, 9200, 11211, 27017
 ];
 
+const THREAT_IDENTITY_FIELDS = [
+  { aggregation: "user_id_identities", field: "user.id" },
+  { aggregation: "user_name_identities", field: "user.name" },
+  { aggregation: "user_email_identities", field: "user.email" },
+  { aggregation: "source_user_id_identities", field: "source.user.id" },
+  { aggregation: "source_user_name_identities", field: "source.user.name" },
+  { aggregation: "source_user_email_identities", field: "source.user.email" },
+  { aggregation: "destination_user_id_identities", field: "destination.user.id" },
+  { aggregation: "destination_user_name_identities", field: "destination.user.name" },
+  { aggregation: "destination_user_email_identities", field: "destination.user.email" },
+  { aggregation: "client_user_id_identities", field: "client.user.id" },
+  { aggregation: "client_user_name_identities", field: "client.user.name" },
+  { aggregation: "server_user_id_identities", field: "server.user.id" },
+  { aggregation: "server_user_name_identities", field: "server.user.name" },
+] as const;
+
+function buildDataHealthFieldDefinitions(timestampField: string): Array<{ key: string; label: string; filter: Record<string, unknown> }> {
+  const anyField = (fields: string[]) => ({
+    bool: {
+      should: fields.map((field) => ({ exists: { field } })),
+      minimum_should_match: 1
+    }
+  });
+  return [
+    { key: "timestamp", label: "Timestamp", filter: { exists: { field: timestampField } } },
+    { key: "source_ip", label: "Source IP", filter: { exists: { field: "source.ip" } } },
+    { key: "destination_ip", label: "Destination IP", filter: { exists: { field: "destination.ip" } } },
+    { key: "event_action", label: "Event action", filter: { exists: { field: "event.action" } } },
+    { key: "namespace", label: "Infrastructure namespace", filter: { exists: { field: "data_stream.namespace" } } },
+    { key: "identity", label: "Identity", filter: anyField(THREAT_IDENTITY_FIELDS.map(({ field }) => field)) },
+    { key: "domain", label: "Domain", filter: anyField(["dns.question.name", "url.domain", "destination.domain"]) },
+    { key: "hash", label: "File hash", filter: anyField(["file.hash.sha256", "file.hash.sha1", "file.hash.md5"]) }
+  ];
+}
+
 function buildDeniedActivityFilter() {
   return {
     bool: {
@@ -808,21 +1020,75 @@ function buildSuccessfulAuthenticationFilter() {
             ]
           }
         },
-        {
-          terms: {
-            "event.action": [
-              "authentication_success", "login_success", "logged-in", "user_login", "ssh_login",
-              "accepted_password", "session_opened"
-            ]
-          }
-        }
+        buildAuthenticationActionFilter([
+          "authentication_success", "login_success", "logged-in", "user_login", "ssh_login",
+          "accepted_password", "session_opened"
+        ])
       ],
       minimum_should_match: 1
     }
   };
 }
 
-function buildThreatEntityAggregation(entityField: string, peerField: string, timestampField: string, size: number) {
+function buildFailedAuthenticationFilter() {
+  return {
+    bool: {
+      should: [
+        {
+          bool: {
+            filter: [
+              { term: { "event.category": "authentication" } },
+              { term: { "event.outcome": "failure" } }
+            ]
+          }
+        },
+        buildAuthenticationActionFilter([
+          "authentication_failed", "login_failed", "failed_login", "logon-failed", "invalid_login",
+          "invalid_user", "user_login_failed", "ssh_login_failed", "failed_password"
+        ])
+      ],
+      minimum_should_match: 1
+    }
+  };
+}
+
+function buildAuthenticationActionFilter(actions: string[]) {
+  return {
+    bool: {
+      filter: [
+        { terms: { "event.action": actions } },
+        {
+          bool: {
+            should: [
+              { term: { "event.category": "authentication" } },
+              { wildcard: { "event.dataset": "*auth*" } },
+              { wildcard: { "event.dataset": "*login*" } },
+              { wildcard: { "event.dataset": "*sshd*" } },
+              { wildcard: { "event.dataset": "*security*" } },
+              { wildcard: { "event.dataset": "*winlog*" } }
+            ],
+            minimum_should_match: 1
+          }
+        }
+      ]
+    }
+  };
+}
+
+function buildAuthenticationActivityFilter() {
+  return {
+    bool: {
+      should: [
+        { term: { "event.category": "authentication" } },
+        buildFailedAuthenticationFilter(),
+        buildSuccessfulAuthenticationFilter()
+      ],
+      minimum_should_match: 1
+    }
+  };
+}
+
+function buildThreatEntityAggregation(entityField: string, peerField: string, timestampField: string, size: number, excludeKnownResolvers = false) {
   return {
     terms: {
       field: entityField,
@@ -833,24 +1099,100 @@ function buildThreatEntityAggregation(entityField: string, peerField: string, ti
     },
     aggs: {
       peer_ips: { cardinality: { field: peerField } },
-      infrastructure: { cardinality: { field: "data_stream.namespace" } },
-      destination_ports: { cardinality: { field: "destination.port" } },
-      ports: { terms: { field: "destination.port", size: 12 } },
-      actions: { terms: { field: "event.action", size: 12 } },
-      outcomes: { terms: { field: "event.outcome", size: 6 } },
-      categories: { terms: { field: "event.category", size: 6 } },
-      datasets: { terms: { field: "event.dataset", size: 5 } },
-      denied_events: { filter: buildDeniedActivityFilter() },
-      authentication_successes: { filter: buildSuccessfulAuthenticationFilter() },
-      threat_signals: {
-        filters: {
-          filters: Object.fromEntries(Object.entries(buildThreatSignalFilters()).filter(([key]) => key !== "denied"))
-        }
-      },
+      ...buildThreatEvidenceAggregations(timestampField),
       outbound_events: {
-        filter: buildPublicIpFilter(peerField),
-        aggs: { peer_values: { terms: { field: peerField, size: 5 } } }
-      },
+        filter: buildPublicIpFilter(peerField, excludeKnownResolvers ? KNOWN_PUBLIC_DNS_IPS : []),
+        aggs: {
+          peer_values: {
+            terms: { field: peerField, size: 5, order: { _count: "desc" } },
+            aggs: buildThreatEvidenceAggregations(timestampField)
+          }
+        }
+      }
+    }
+  };
+}
+
+function buildThreatEvidenceAggregations(timestampField: string) {
+  return {
+    infrastructure: { cardinality: { field: "data_stream.namespace" } },
+    destination_ports: { cardinality: { field: "destination.port" } },
+    ports: { terms: { field: "destination.port", size: 12 } },
+    actions: { terms: { field: "event.action", size: 12 } },
+    outcomes: { terms: { field: "event.outcome", size: 6 } },
+    categories: { terms: { field: "event.category", size: 6 } },
+    datasets: { terms: { field: "event.dataset", size: 5 } },
+    denied_events: { filter: buildDeniedActivityFilter() },
+    authentication_successes: { filter: buildSuccessfulAuthenticationFilter() },
+    source_bytes: { sum: { field: "source.bytes" } },
+    network_bytes: { sum: { field: "network.bytes" } },
+    threat_signals: {
+      filters: {
+        filters: Object.fromEntries(Object.entries(buildThreatSignalFilters()).filter(([key]) => key !== "denied"))
+      }
+    },
+    latest: {
+      top_hits: {
+        size: 1,
+        sort: [{ [timestampField]: { order: "desc" } }],
+        _source: {
+          includes: [
+            timestampField,
+            "source.ip",
+            "destination.ip",
+            "client.ip",
+            "server.ip",
+            "source.bytes",
+            "network.bytes",
+            "destination.port",
+            "event.action",
+            "event.outcome",
+            "event.category",
+            "event.dataset",
+            "event.reason",
+            "rule.name",
+            "rule.description",
+            "threat.indicator.description",
+            "dns.question.name",
+            "url.domain",
+            "destination.domain",
+            "file.hash.sha256",
+            "file.hash.sha1",
+            "file.hash.md5",
+            "process.command_line",
+            "host.name",
+            "message"
+          ]
+        }
+      }
+    }
+  };
+}
+
+function buildThreatIndicatorAggregation(field: string, timestampField: string, size: number) {
+  return {
+    terms: {
+      field,
+      size,
+      shard_size: size * 2,
+      order: { _count: "desc" }
+    },
+    aggs: {
+      infrastructure: { cardinality: { field: "data_stream.namespace" } },
+      infrastructures: { terms: { field: "data_stream.namespace", size: 12 } },
+      source_ip_count: { cardinality: { field: "source.ip" } },
+      source_ips: { terms: { field: "source.ip", size: 12 } },
+      destination_ip_count: { cardinality: { field: "destination.ip" } },
+      destination_ips: { terms: { field: "destination.ip", size: 8 } },
+      ports: { terms: { field: "destination.port", size: 8 } },
+      actions: { terms: { field: "event.action", size: 8 } },
+      outcomes: { terms: { field: "event.outcome", size: 6 } },
+      datasets: { terms: { field: "event.dataset", size: 5 } },
+      authentication_events: { filter: buildAuthenticationActivityFilter() },
+      failed_authentication: { filter: buildFailedAuthenticationFilter() },
+      successful_authentication: { filter: buildSuccessfulAuthenticationFilter() },
+      first_seen: { min: { field: timestampField } },
+      last_seen: { max: { field: timestampField } },
       latest: {
         top_hits: {
           size: 1,
@@ -888,7 +1230,7 @@ function buildThreatEntityAggregation(entityField: string, peerField: string, ti
   };
 }
 
-function buildThreatIndicatorAggregation(field: string, timestampField: string, size: number) {
+function buildThreatIdentityAggregation(field: string, timestampField: string, size: number) {
   return {
     terms: {
       field,
@@ -897,9 +1239,21 @@ function buildThreatIndicatorAggregation(field: string, timestampField: string, 
       order: { _count: "desc" }
     },
     aggs: {
+      authentication_events: { filter: buildAuthenticationActivityFilter() },
+      failed_authentication: { filter: buildFailedAuthenticationFilter() },
+      successful_authentication: { filter: buildSuccessfulAuthenticationFilter() },
       infrastructure: { cardinality: { field: "data_stream.namespace" } },
-      actions: { terms: { field: "event.action", size: 8 } },
-      datasets: { terms: { field: "event.dataset", size: 5 } },
+      infrastructures: { terms: { field: "data_stream.namespace", size: 12 } },
+      source_ip_count: { cardinality: { field: "source.ip" } },
+      source_ips: { terms: { field: "source.ip", size: 12 } },
+      destination_ip_count: { cardinality: { field: "destination.ip" } },
+      destination_ips: { terms: { field: "destination.ip", size: 8 } },
+      ports: { terms: { field: "destination.port", size: 8 } },
+      actions: { terms: { field: "event.action", size: 12 } },
+      outcomes: { terms: { field: "event.outcome", size: 6 } },
+      datasets: { terms: { field: "event.dataset", size: 6 } },
+      first_seen: { min: { field: timestampField } },
+      last_seen: { max: { field: timestampField } },
       latest: {
         top_hits: {
           size: 1,
@@ -909,25 +1263,30 @@ function buildThreatIndicatorAggregation(field: string, timestampField: string, 
               timestampField,
               "source.ip",
               "destination.ip",
-              "client.ip",
-              "server.ip",
               "destination.port",
               "event.action",
               "event.outcome",
               "event.category",
               "event.dataset",
-              "event.reason",
-              "rule.name",
-              "rule.description",
-              "threat.indicator.description",
-              "dns.question.name",
-              "url.domain",
-              "destination.domain",
-              "file.hash.sha256",
-              "file.hash.sha1",
-              "file.hash.md5",
-              "process.command_line",
               "host.name",
+              "user.id",
+              "user.domain",
+              "user.name",
+              "user.email",
+              "source.user.id",
+              "source.user.domain",
+              "source.user.name",
+              "source.user.email",
+              "destination.user.id",
+              "destination.user.domain",
+              "destination.user.name",
+              "destination.user.email",
+              "client.user.id",
+              "client.user.domain",
+              "client.user.name",
+              "server.user.id",
+              "server.user.domain",
+              "server.user.name",
               "message"
             ]
           }
@@ -988,7 +1347,7 @@ function buildSecuritySignalAggregation(entitySize: number, indicatorSize: numbe
   };
 }
 
-function buildPublicIpFilter(field: string) {
+function buildPublicIpFilter(field: string, excludedIps: readonly string[] = []) {
   const privateRanges = [
     ["0.0.0.0", "0.255.255.255"],
     ["10.0.0.0", "10.255.255.255"],
@@ -1006,25 +1365,53 @@ function buildPublicIpFilter(field: string) {
   return {
     bool: {
       filter: [{ exists: { field } }],
-      must_not: privateRanges.map(([gte, lte]) => ({ range: { [field]: { gte, lte } } }))
+      must_not: [
+        ...privateRanges.map(([gte, lte]) => ({ range: { [field]: { gte, lte } } })),
+        ...(excludedIps.length > 0 ? [{ terms: { [field]: excludedIps } }] : [])
+      ]
     }
   };
 }
 
-function summarizeThreatRadarEntities(raw: unknown, aggregationName: string, role: ThreatRadarRole): ThreatRadarFinding[] {
+export function summarizeThreatRadarEntities(raw: unknown, aggregationName: string, role: ThreatRadarRole): ThreatRadarFinding[] {
   const aggregations = asRecord(asRecord(raw).aggregations);
   const group = asRecord(aggregations[aggregationName]);
   const buckets = Array.isArray(group.buckets) ? group.buckets : [];
   return buckets
-    .map((bucket) => {
+    .flatMap((bucket) => {
       const record = asRecord(bucket);
-      return summarizeThreatEntityBucket(record, role, readThreatSignalCounts(raw, aggregationName, String(record.key ?? "--")));
+      const ip = String(record.key ?? "--");
+      if (role === "source" && isPrivateIp(ip)) {
+        const outboundPeers = asRecord(asRecord(record.outbound_events).peer_values).buckets;
+        if (Array.isArray(outboundPeers) && outboundPeers.length > 0) {
+          return outboundPeers.map((peer) => {
+            const peerBucket = asRecord(peer);
+            const peerIp = String(peerBucket.key ?? "--");
+            return summarizeThreatEntityBucket({
+              ...peerBucket,
+              key: ip,
+              peer_ips: { value: 1 },
+              outbound_events: {
+                doc_count: readNumber(peerBucket.doc_count),
+                peer_values: { buckets: [{ key: peerIp, doc_count: readNumber(peerBucket.doc_count) }] }
+              }
+            }, role, {}, "source_destination");
+          });
+        }
+      }
+      return [summarizeThreatEntityBucket(
+        record,
+        role,
+        readThreatSignalCounts(raw, aggregationName, ip),
+        "entity"
+      )];
     })
     .filter((item) => item.ip !== "--")
     .filter((item) => item.score > 0);
 }
 
 function isActionableThreatFinding(finding: ThreatRadarFinding): boolean {
+  if (isRoutineKnownDestination(finding) && finding.matchedKeywords.length === 0) return false;
   const hasBehavioralSignal = finding.deniedEvents >= 10
     || finding.suspiciousKeywordHits > 0
     || finding.destinationPorts >= 8
@@ -1036,19 +1423,21 @@ function isActionableThreatFinding(finding: ThreatRadarFinding): boolean {
 }
 
 export function isConfirmedSuspiciousFinding(finding: ThreatRadarFinding & { gti?: GtiIpReputation }): boolean {
-  const reputationRisk = hasAdverseGtiReputation(finding.gti);
-  const supportedCommandControl = finding.matchedKeywords.includes("command_control")
-    && (reputationRisk || hasStrongCommandControlBehavior(finding));
-  const strongThreatLanguage = finding.matchedKeywords.some((keyword) => [
-    "brute_force",
-    "malware",
-    "exfiltration",
-    "exploit",
-    "phishing"
-  ].includes(keyword)) || supportedCommandControl;
-  const scanBehavior = finding.role === "source" && finding.destinationPorts >= 8 && finding.relatedHosts >= 4;
+  const reputation = finding.gti ? classifyGtiReputation(finding.gti) : "Unknown";
+  const maliciousReputation = reputation === "Malicious";
+  const reputationRisk = reputation !== "Clean" && reputation !== "Unknown";
+  const supportedThreatLanguage = finding.matchedKeywords.some((keyword) =>
+    isSupportedFindingSignal(finding, keyword)
+  );
+  const knownPublicEntity = finding.direction !== "outbound" && Boolean(getKnownInfrastructure(finding.ip));
+  const scanBehavior = finding.role === "source"
+    && finding.direction === "inbound"
+    && finding.destinationPorts >= 8
+    && finding.relatedHosts >= 4
+    && (finding.deniedEvents >= 20 || reputationRisk);
   const riskyPublicServiceAttack = finding.role === "source"
     && isPublicIp(finding.ip)
+    && !knownPublicEntity
     && finding.dangerousPorts.length > 0
     && finding.events >= 400
     && finding.relatedHosts >= 4;
@@ -1056,25 +1445,33 @@ export function isConfirmedSuspiciousFinding(finding: ThreatRadarFinding & { gti
     || finding.dangerousPorts.length > 0
     || finding.destinationPorts >= 8
     || finding.relatedHosts >= 4;
-  const corroboratedThreatLanguage = strongThreatLanguage && (reputationRisk || behaviorEvidence);
+  const corroboratedThreatLanguage = supportedThreatLanguage && (reputationRisk || behaviorEvidence);
   const deniedAttackBehavior = finding.role === "source" && ((finding.deniedEvents >= 100
-    && (isPublicIp(finding.ip) || finding.dangerousPorts.length > 0 || finding.destinationPorts >= 4 || strongThreatLanguage))
+    && (isPublicIp(finding.ip) || finding.dangerousPorts.length > 0 || finding.destinationPorts >= 4 || supportedThreatLanguage))
     || (finding.deniedEvents >= 20
       && (finding.dangerousPorts.length > 0 || scanBehavior || corroboratedThreatLanguage)));
 
   if (finding.direction === "outbound") {
+    if (finding.evidenceScope !== "source_destination") return false;
+    if (isRoutineKnownDestination(finding) && !reputationRisk) return false;
     return (reputationRisk && finding.outboundEvents >= 5)
-      || (corroboratedThreatLanguage && finding.outboundEvents >= 5)
-      || (supportedCommandControl && finding.outboundEvents > 0);
+      || (supportedThreatLanguage && finding.outboundEvents >= 5);
   }
   if (finding.direction === "internal" || !isPublicIp(finding.ip)) return false;
-  return reputationRisk || corroboratedThreatLanguage || scanBehavior || riskyPublicServiceAttack || deniedAttackBehavior;
+  if (knownPublicEntity && !reputationRisk && !supportedThreatLanguage) return false;
+  return maliciousReputation
+    || (reputationRisk && behaviorEvidence)
+    || corroboratedThreatLanguage
+    || scanBehavior
+    || riskyPublicServiceAttack
+    || deniedAttackBehavior;
 }
 
 export function isInvestigationCandidate(finding: ThreatRadarFinding & { gti?: GtiIpReputation }): boolean {
   if (finding.direction === "internal") return false;
 
   const reputationRisk = hasAdverseGtiReputation(finding.gti);
+  const knownPublicEntity = finding.direction !== "outbound" && Boolean(getKnownInfrastructure(finding.ip));
   const evidence = [
     finding.deniedEvents >= 10,
     finding.dangerousPorts.length > 0 && finding.events >= 20,
@@ -1089,11 +1486,15 @@ export function isInvestigationCandidate(finding: ThreatRadarFinding & { gti?: G
     || (finding.matchedKeywords.length > 0 && evidence >= 2);
 
   if (finding.direction === "outbound") {
+    if (isRoutineKnownDestination(finding) && !reputationRisk) return false;
     return isPrivateIp(finding.ip)
       && isPublicIp(finding.gtiIp)
+      && finding.evidenceScope === "source_destination"
       && finding.outboundEvents >= 5
-      && (reputationRisk || strongBehavior || evidence >= 2);
+      && (reputationRisk || finding.matchedKeywords.length > 0 || (strongBehavior && finding.deniedEvents >= 20));
   }
+
+  if (knownPublicEntity && !reputationRisk && finding.matchedKeywords.length === 0) return false;
 
   return isPublicIp(finding.ip)
     && finding.score >= 20
@@ -1106,6 +1507,7 @@ function hasAdverseGtiReputation(gti?: GtiIpReputation): boolean {
 
 function hasStrongCommandControlBehavior(finding: ThreatRadarFinding): boolean {
   return (finding.signalCounts.command_control ?? 0) >= 3
+    && finding.evidenceScope === "source_destination"
     && finding.outboundEvents >= 20
     && (finding.deniedEvents >= 20 || finding.destinationPorts >= 4 || finding.dangerousPorts.length > 0);
 }
@@ -1132,28 +1534,54 @@ function isSupportedFindingSignal(finding: ThreatRadarFinding & { gti?: GtiIpRep
   const count = finding.signalCounts[signal] ?? 0;
   const reputation = finding.gti ? classifyGtiReputation(finding.gti) : "Unknown";
   const publicSubject = isPublicIp(finding.ip);
+  const exactOutbound = finding.direction === "outbound"
+    && finding.evidenceScope === "source_destination"
+    && isPrivateIp(finding.sourceIp)
+    && isPublicIp(finding.destinationIp);
+  const expectedKnownDestination = exactOutbound && Boolean(getKnownInfrastructure(finding.destinationIp));
+
+  if (expectedKnownDestination && reputation !== "Malicious" && reputation !== "Suspicious") return false;
 
   if (signal === "command_control") {
-    return publicSubject
-      ? reputation === "Malicious" || (reputation !== "Clean" && count >= 3 && finding.deniedEvents >= 20)
-      : finding.direction === "outbound" && (reputation === "Malicious" || hasStrongCommandControlBehavior(finding));
+    return exactOutbound
+      && count >= 1
+      && (reputation === "Malicious" || hasStrongCommandControlBehavior(finding));
   }
   if (signal === "exfiltration") {
-    return finding.direction === "outbound"
-      && count >= 3
-      && finding.outboundEvents >= 50
-      && (reputation !== "Clean" || finding.destinationPorts >= 4);
+    const materialTransfer = finding.outboundBytes >= 25 * 1024 * 1024;
+    return exactOutbound
+      && count >= 2
+      && finding.outboundEvents >= 10
+      && (reputation === "Malicious" || reputation === "Suspicious" || materialTransfer);
   }
+  if (signal === "malware" && exactOutbound) return reputation === "Malicious" && count > 0;
   if (!publicSubject) return false;
   if (signal === "malware") return reputation === "Malicious"
     || (reputation !== "Clean" && count >= 3 && finding.deniedEvents >= 20);
   if (signal === "brute_force") return count >= 3
+    && finding.direction === "inbound"
     && finding.deniedEvents >= 20
     && (finding.dangerousPorts.length > 0 || finding.relatedHosts >= 2 || finding.successfulEvents > 0);
-  if (signal === "scanning") return count > 0 && (finding.destinationPorts >= 8 || finding.relatedHosts >= 4);
-  if (signal === "exploit") return count >= 2 && (reputation !== "Clean" || finding.deniedEvents >= 20 || finding.successfulEvents > 0);
+  if (signal === "scanning") return finding.direction === "inbound"
+    && count > 0
+    && (finding.destinationPorts >= 8 || finding.relatedHosts >= 4)
+    && (finding.deniedEvents >= 20 || reputation !== "Clean");
+  if (signal === "exploit") return finding.direction === "inbound"
+    && count >= 2
+    && (reputation !== "Clean" || finding.deniedEvents >= 20 || finding.successfulEvents > 0);
   if (signal === "phishing") return count >= 2 && reputation !== "Clean";
   return false;
+}
+
+function isRoutineKnownDestination(finding: ThreatRadarFinding): boolean {
+  return finding.direction === "outbound"
+    && finding.evidenceScope === "source_destination"
+    && isRoutineKnownInfrastructureTraffic({
+      destinationIp: finding.destinationIp,
+      ports: finding.topPorts,
+      actions: finding.actions,
+      datasets: finding.datasets
+    });
 }
 
 const THREAT_SIGNAL_WEIGHTS: Record<string, number> = {
@@ -1177,9 +1605,12 @@ function severityForScore(score: number): ThreatRadarSeverity {
 function rankThreatRadarFindings<T extends ThreatRadarFinding>(findings: T[], size: number): T[] {
   const byIp = new Map<string, T>();
   for (const finding of findings) {
-    const existing = byIp.get(finding.ip);
+    const key = finding.direction === "outbound" && finding.evidenceScope === "source_destination"
+      ? `${finding.role}:${finding.sourceIp}->${finding.destinationIp}`
+      : `${finding.role}:${finding.ip}`;
+    const existing = byIp.get(key);
     if (!existing || finding.score > existing.score || (finding.score === existing.score && finding.events > existing.events)) {
-      byIp.set(finding.ip, finding);
+      byIp.set(key, finding);
     }
   }
   return [...byIp.values()]
@@ -1193,7 +1624,12 @@ function rankThreatRadarFindings<T extends ThreatRadarFinding>(findings: T[], si
     .slice(0, size);
 }
 
-function summarizeThreatEntityBucket(bucket: Record<string, unknown>, role: ThreatRadarRole, signalCounts: Record<string, number>): ThreatRadarFinding {
+function summarizeThreatEntityBucket(
+  bucket: Record<string, unknown>,
+  role: ThreatRadarRole,
+  signalCounts: Record<string, number>,
+  evidenceScope: ThreatRadarFinding["evidenceScope"]
+): ThreatRadarFinding {
   const ip = typeof bucket.key === "string" ? bucket.key : String(bucket.key ?? "--");
   const latestHit = readLatestHit(bucket);
   const outboundPeers = readBuckets(asRecord(asRecord(bucket.outbound_events).peer_values).buckets);
@@ -1220,6 +1656,10 @@ function summarizeThreatEntityBucket(bucket: Record<string, unknown>, role: Thre
   const deniedEvents = Math.max(readNumber(asRecord(bucket.denied_events).doc_count), signalCounts.denied ?? 0);
   const successfulEvents = readNumber(asRecord(bucket.authentication_successes).doc_count);
   const outboundEvents = readNumber(asRecord(bucket.outbound_events).doc_count);
+  const outboundBytes = Math.max(
+    readNumber(asRecord(bucket.source_bytes).value),
+    readNumber(asRecord(bucket.network_bytes).value)
+  );
   const matchedKeywords = Object.entries(combinedSignalCounts).filter(([key, count]) => key !== "denied" && count > 0).map(([key]) => key);
   const suspiciousKeywordHits = matchedKeywords.reduce((sum, key) => sum + (combinedSignalCounts[key] ?? 0), 0);
   const direction: ThreatRadarDirection = role === "source"
@@ -1300,6 +1740,7 @@ function summarizeThreatEntityBucket(bucket: Record<string, unknown>, role: Thre
     gtiIp,
     role,
     direction,
+    evidenceScope,
     score,
     severity: severityForScore(score),
     events,
@@ -1313,6 +1754,7 @@ function summarizeThreatEntityBucket(bucket: Record<string, unknown>, role: Thre
     deniedEvents,
     successfulEvents,
     outboundEvents,
+    outboundBytes,
     suspiciousKeywordHits,
     matchedKeywords,
     signalCounts: combinedSignalCounts,
@@ -1328,14 +1770,199 @@ function readLocalThreatSignalCounts(bucket: Record<string, unknown>): Record<st
   );
 }
 
-function summarizeThreatRadarIndicators(raw: unknown, aggregationName: string, type: "domain" | "hash"): ThreatRadarIndicator[] {
+const THREAT_RADAR_IDENTITY_BASELINE_KEY = "threatRadarIdentityBaselineV1";
+
+async function analyzeThreatRadarIdentities(
+  raw: unknown,
+  size: number,
+  exclusions: string[],
+  exceptions: CandidateException[]
+): Promise<ThreatRadarIdentityAnomaly[]> {
+  const observations: IdentityObservation[] = [];
+  for (const { aggregation, field } of THREAT_IDENTITY_FIELDS) {
+    observations.push(...summarizeIdentityAggregation(raw, aggregation, field, true));
+  }
+  for (const [aggregation, field] of [
+    ["dns_domain_entities", "dns.question.name"],
+    ["url_domain_entities", "url.domain"],
+    ["destination_domain_entities", "destination.domain"]
+  ] as const) {
+    observations.push(...summarizeIdentityAggregation(raw, aggregation, field, false));
+  }
+
+  const merged = mergeIdentityObservations(observations).filter((observation) => !isExcludedCandidate({
+    type: "identity",
+    normalized: observation.identity,
+    sourceIp: observation.sourceIp,
+    destinationIp: observation.destinationIp,
+    values: [observation.identity, ...observation.actions.map((action) => action.key), ...observation.datasets.map((dataset) => dataset.key)],
+    text: observation.rawIdentity,
+    fields: {
+      [observation.sourceField]: observation.identity,
+      "source.ip": observation.sourceIp,
+      "destination.ip": observation.destinationIp,
+      "data_stream.dataset": observation.datasets.map((dataset) => dataset.key)
+    }
+  }, exclusions, exceptions));
+  const stored = await chrome.storage.local.get(THREAT_RADAR_IDENTITY_BASELINE_KEY);
+  const baseline = readIdentityBaseline(stored[THREAT_RADAR_IDENTITY_BASELINE_KEY]);
+  const observedAt = new Date().toISOString();
+  const assessed = assessIdentityObservations(merged, baseline, observedAt);
+  await chrome.storage.local.set({ [THREAT_RADAR_IDENTITY_BASELINE_KEY]: assessed.baseline });
+  return assessed.findings.slice(0, size);
+}
+
+function summarizeIdentityAggregation(
+  raw: unknown,
+  aggregationName: string,
+  sourceField: string,
+  allowAccount: boolean
+): IdentityObservation[] {
+  const aggregations = asRecord(asRecord(raw).aggregations);
+  const buckets = asRecord(aggregations[aggregationName]).buckets;
+  if (!Array.isArray(buckets)) return [];
+  return buckets.flatMap((item) => {
+    const bucket = asRecord(item);
+    const rawIdentity = String(bucket.key ?? "");
+    const classified = classifyIdentityValue(rawIdentity, allowAccount);
+    if (!classified) return [];
+    const latest = readLatestHit(bucket);
+    const actions = readBuckets(asRecord(bucket.actions).buckets);
+    const outcomes = readBuckets(asRecord(bucket.outcomes).buckets);
+    const sourceIps = readBuckets(asRecord(bucket.source_ips).buckets).map((entry) => entry.key).filter((entry) => entry !== "--");
+    const destinationIps = readBuckets(asRecord(bucket.destination_ips).buckets).map((entry) => entry.key).filter((entry) => entry !== "--");
+    const infrastructures = readBuckets(asRecord(bucket.infrastructures).buckets).map((entry) => entry.key).filter((entry) => entry !== "--");
+    const ports = readBuckets(asRecord(bucket.ports).buckets).map((entry) => Number(entry.key)).filter(Number.isFinite);
+    const datasets = readBuckets(asRecord(bucket.datasets).buckets);
+    const failedEvents = readNumber(asRecord(bucket.failed_authentication).doc_count);
+    const successfulEvents = readNumber(asRecord(bucket.successful_authentication).doc_count);
+    const authenticationEvents = Math.max(
+      readNumber(asRecord(bucket.authentication_events).doc_count),
+      failedEvents + successfulEvents
+    );
+    const firstSeen = readAggregationTimestamp(bucket.first_seen) ?? latest.timestamp;
+    const lastSeen = readAggregationTimestamp(bucket.last_seen) ?? latest.timestamp;
+    return [{
+      identity: classified.value,
+      rawIdentity,
+      identityType: classified.type,
+      sourceField,
+      encodedValue: classified.encodedValue,
+      sourceIp: sourceIps[0] ?? latest.sourceIp ?? latest.clientIp ?? "--",
+      destinationIp: destinationIps[0] ?? latest.destinationIp ?? latest.serverIp ?? "--",
+      service: datasets[0]?.key ?? (ports[0] ? `port ${ports[0]}` : "--"),
+      events: readNumber(bucket.doc_count),
+      authenticationEvents,
+      failedEvents,
+      successfulEvents,
+      infrastructureCount: Math.max(readNumber(asRecord(bucket.infrastructure).value), infrastructures.length),
+      infrastructures,
+      sourceIpCount: Math.max(readNumber(asRecord(bucket.source_ip_count).value), sourceIps.length),
+      sourceIps,
+      destinationPorts: ports.slice(0, 8),
+      actions: [...actions, ...outcomes].slice(0, 8),
+      datasets: datasets.slice(0, 6),
+      ...(firstSeen ? { firstSeen } : {}),
+      ...(lastSeen ? { lastSeen } : {})
+    }];
+  });
+}
+
+function mergeIdentityObservations(observations: IdentityObservation[]): IdentityObservation[] {
+  const merged = new Map<string, IdentityObservation>();
+  for (const observation of observations) {
+    const key = observation.identity.toLowerCase();
+    const prior = merged.get(key);
+    if (!prior) {
+      merged.set(key, observation);
+      continue;
+    }
+    const sourceIps = [...new Set([...prior.sourceIps, ...observation.sourceIps])].slice(0, 12);
+    const infrastructures = [...new Set([...prior.infrastructures, ...observation.infrastructures])].slice(0, 12);
+    const destinationPorts = [...new Set([...prior.destinationPorts, ...observation.destinationPorts])].slice(0, 8);
+    const firstSeen = earliestTimestamp(prior.firstSeen, observation.firstSeen);
+    const lastSeen = latestTimestamp(prior.lastSeen, observation.lastSeen);
+    merged.set(key, {
+      ...prior,
+      rawIdentity: prior.encodedValue ? prior.rawIdentity : observation.rawIdentity,
+      identityType: prior.identityType === "service_account" || observation.identityType === "service_account" ? "service_account" : prior.identityType,
+      sourceField: prior.sourceField.includes("domain") ? prior.sourceField : observation.sourceField,
+      encodedValue: prior.encodedValue || observation.encodedValue,
+      sourceIp: prior.sourceIp !== "--" ? prior.sourceIp : observation.sourceIp,
+      destinationIp: prior.destinationIp !== "--" ? prior.destinationIp : observation.destinationIp,
+      service: prior.service !== "--" ? prior.service : observation.service,
+      events: Math.max(prior.events, observation.events),
+      authenticationEvents: Math.max(prior.authenticationEvents, observation.authenticationEvents),
+      failedEvents: Math.max(prior.failedEvents, observation.failedEvents),
+      successfulEvents: Math.max(prior.successfulEvents, observation.successfulEvents),
+      infrastructureCount: Math.max(prior.infrastructureCount, observation.infrastructureCount, infrastructures.length),
+      infrastructures,
+      sourceIpCount: Math.max(prior.sourceIpCount, observation.sourceIpCount, sourceIps.length),
+      sourceIps,
+      destinationPorts,
+      actions: mergeCountBuckets(prior.actions, observation.actions, 8),
+      datasets: mergeCountBuckets(prior.datasets, observation.datasets, 6),
+      ...(firstSeen ? { firstSeen } : {}),
+      ...(lastSeen ? { lastSeen } : {})
+    });
+  }
+  return [...merged.values()];
+}
+
+function readIdentityBaseline(value: unknown): IdentityBaseline {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as IdentityBaseline;
+}
+
+function mergeCountBuckets(
+  left: Array<{ key: string; count: number }>,
+  right: Array<{ key: string; count: number }>,
+  limit: number
+): Array<{ key: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const item of [...left, ...right]) counts.set(item.key, Math.max(counts.get(item.key) ?? 0, item.count));
+  return [...counts.entries()].map(([key, count]) => ({ key, count })).sort((a, b) => b.count - a.count).slice(0, limit);
+}
+
+function readAggregationTimestamp(value: unknown): string | undefined {
+  const record = asRecord(value);
+  if (typeof record.value_as_string === "string") return record.value_as_string;
+  if (typeof record.value === "number" && Number.isFinite(record.value)) return new Date(record.value).toISOString();
+  return undefined;
+}
+
+function earliestTimestamp(left?: string, right?: string): string | undefined {
+  if (!left) return right;
+  if (!right) return left;
+  return Date.parse(left) <= Date.parse(right) ? left : right;
+}
+
+function latestTimestamp(left?: string, right?: string): string | undefined {
+  if (!left) return right;
+  if (!right) return left;
+  return Date.parse(left) >= Date.parse(right) ? left : right;
+}
+
+export function summarizeThreatRadarIndicators(raw: unknown, aggregationName: string, type: "domain" | "hash"): ThreatRadarIndicator[] {
   const aggregations = asRecord(asRecord(raw).aggregations);
   const group = asRecord(aggregations[aggregationName]);
-  const buckets = Array.isArray(group.buckets) ? group.buckets : [];
-  return buckets
-    .map((bucket) => {
+  const bucketsByValue = new Map<string, Record<string, unknown>>();
+  const addBuckets = (value: unknown) => {
+    if (!Array.isArray(value)) return;
+    for (const bucket of value) {
       const record = asRecord(bucket);
-      return summarizeThreatIndicatorBucket(record, type, readThreatSignalCounts(raw, aggregationName, String(record.key ?? "--")));
+      const key = String(record.key ?? "--");
+      if (key !== "--" && !bucketsByValue.has(key)) bucketsByValue.set(key, record);
+    }
+  };
+  addBuckets(group.buckets);
+  const signalBuckets = asRecord(asRecord(aggregations.security_signals).buckets);
+  for (const signalBucket of Object.values(signalBuckets)) {
+    addBuckets(asRecord(asRecord(signalBucket)[aggregationName]).buckets);
+  }
+  return [...bucketsByValue.values()]
+    .map((bucket) => {
+      return summarizeThreatIndicatorBucket(bucket, type, readThreatSignalCounts(raw, aggregationName, String(bucket.key ?? "--")));
     })
     .filter((item) => item.value !== "--")
     .filter((item) => item.suspiciousKeywordHits > 0
@@ -1414,7 +2041,11 @@ function rankThreatRadarIndicators(indicators: ThreatRadarIndicator[], size: num
     .slice(0, size);
 }
 
-function summarizeDetectionSignals(findings: ThreatRadarFinding[], indicators: ThreatRadarIndicator[]) {
+function summarizeDetectionSignals(
+  findings: ThreatRadarFinding[],
+  indicators: ThreatRadarIndicator[],
+  identityAnomalies: ThreatRadarIdentityAnomaly[]
+) {
   const combinedKeywords = [...findings.flatMap((item) => item.matchedKeywords), ...indicators.flatMap((item) => item.matchedKeywords)];
   const keywordCounts = combinedKeywords.reduce<Record<string, number>>((counts, key) => {
     counts[key] = (counts[key] ?? 0) + 1;
@@ -1424,6 +2055,7 @@ function summarizeDetectionSignals(findings: ThreatRadarFinding[], indicators: T
     { key: "denied", label: "Denied activity", count: findings.filter((item) => item.role === "source" && item.direction === "inbound" && isPublicIp(item.ip) && item.deniedEvents > 0).length },
     { key: "outbound", label: "Suspicious outbound", count: findings.filter((item) => item.direction === "outbound").length },
     { key: "dangerous_ports", label: "Risky ports", count: findings.filter((item) => item.role === "source" && item.direction === "inbound" && isPublicIp(item.ip) && item.dangerousPorts.length > 0).length },
+    { key: "identity_auth", label: "Authentication attack evidence", count: identityAnomalies.filter((item) => item.promoted).length },
     ...Object.entries(keywordCounts).map(([key, count]) => ({
       key,
       label: key === "command_control" ? "Command control evidence" : formatSignalLabel(key),
@@ -1516,14 +2148,17 @@ function summarizeGtiCoverage(items: GtiEnrichmentState[], configured: boolean):
   const scored = relevant.filter((item) => Boolean(item.gti)).length;
   const rateLimited = relevant.filter((item) => item.gtiStatus === "rate_limited").length;
   const pending = relevant.filter((item) => item.gtiStatus === "pending").length;
-  const failed = relevant.filter((item) => ["not_found", "unauthorized", "unavailable"].includes(item.gtiStatus ?? "")).length;
+  const notFound = relevant.filter((item) => item.gtiStatus === "not_found").length;
+  const unauthorized = relevant.filter((item) => item.gtiStatus === "unauthorized").length;
+  const unavailable = relevant.filter((item) => item.gtiStatus === "unavailable").length;
+  const failed = notFound + unauthorized + unavailable;
   const status = !configured
     ? "not_configured"
-    : relevant.some((item) => item.gtiStatus === "unauthorized" || item.gtiStatus === "unavailable") && scored === 0
+    : (unauthorized > 0 || unavailable > 0) && scored === 0
       ? "unavailable"
-      : scored === relevant.length
-        ? "healthy"
-        : "partial";
+      : pending > 0 || rateLimited > 0 || unauthorized > 0 || unavailable > 0
+        ? "partial"
+        : "healthy";
   return {
     status,
     requested: relevant.length,
@@ -1531,8 +2166,24 @@ function summarizeGtiCoverage(items: GtiEnrichmentState[], configured: boolean):
     cached: relevant.filter((item) => item.gtiCached).length,
     pending,
     rateLimited,
-    failed
+    notFound,
+    unauthorized,
+    unavailable,
+    failed,
+    failureReasons: summarizeGtiFailureReasons(relevant)
   };
+}
+
+function summarizeGtiFailureReasons(items: GtiEnrichmentState[]): Array<{ message: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    if (item.gtiStatus !== "unavailable" || !item.gtiMessage) continue;
+    counts.set(item.gtiMessage, (counts.get(item.gtiMessage) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([message, count]) => ({ message, count }))
+    .sort((left, right) => right.count - left.count)
+    .slice(0, 3);
 }
 
 function removeUnsupportedIndicatorLabels(indicator: ThreatRadarIndicator): ThreatRadarIndicator {
@@ -1557,19 +2208,20 @@ function isSupportedIndicatorSignal(indicator: ThreatRadarIndicator, signal: str
   const count = indicator.signalCounts[signal] ?? 0;
   const reputation = indicator.gti ? classifyGtiReputation(indicator.gti) : "Unknown";
 
-  if (signal === "malware") return reputation === "Malicious" || (indicator.type === "hash" && count > 0) || count >= 3;
-  if (signal === "command_control") return reputation === "Malicious" || count >= 3;
-  if (signal === "phishing") return reputation !== "Clean" && count >= 2;
-  if (signal === "exploit") return count >= 2 && reputation !== "Clean";
-  return count >= 3 && (indicator.deniedEvents >= 10 || indicator.events >= 20);
+  if (reputation === "Clean") return false;
+  if (reputation === "Malicious") return count > 0;
+  if (reputation === "Suspicious") return count > 0;
+  if (signal === "malware" && indicator.type === "hash") return count > 0;
+  if (["malware", "command_control", "phishing", "exploit"].includes(signal)) {
+    return count >= 3 && indicator.deniedEvents >= 10;
+  }
+  return count >= 5 && indicator.deniedEvents >= 20 && indicator.events >= 20;
 }
 
-function isConfirmedSuspiciousIndicator(indicator: ThreatRadarIndicator): boolean {
+export function isConfirmedSuspiciousIndicator(indicator: ThreatRadarIndicator): boolean {
   if (hasAdverseGtiReputation(indicator.gti)) return true;
   if (indicator.matchedKeywords.length > 0) return true;
-  return indicator.type === "domain"
-    && indicator.deniedEvents >= 10
-    && indicator.reasons.includes("Unusual domain shape");
+  return false;
 }
 
 export function calculateGtiBoost(gti?: GtiIpReputation): number {
@@ -1621,7 +2273,10 @@ const GTI_CACHE_KEY = "gtiReputationCacheV1";
 const GTI_CACHE_LIMIT = 2000;
 const GTI_SCORE_TTL_MS = 24 * 60 * 60 * 1000;
 const GTI_NOT_FOUND_TTL_MS = 60 * 60 * 1000;
-const GTI_FAILURE_TTL_MS = 5 * 60 * 1000;
+const GTI_FAILURE_TTL_MS = 60 * 1000;
+const GTI_REQUEST_TIMEOUT_MS = 8 * 1000;
+const GTI_MAX_ATTEMPTS = 3;
+const GTI_TRANSIENT_HTTP_STATUSES = new Set([408, 425, 500, 502, 503, 504]);
 let gtiRateLimitedUntil = 0;
 
 export function resetGtiLookupState(): void {
@@ -1630,7 +2285,16 @@ export function resetGtiLookupState(): void {
 
 async function fetchGtiReputations(targets: GtiLookupTarget[], apiKey: string): Promise<Map<string, GtiLookupResult>> {
   const results = new Map<string, GtiLookupResult>();
-  const uniqueTargets = [...new Map(targets.map((target) => [gtiCacheKey(target.value, target.type), target])).values()];
+  const uniqueTargets = [...new Map(targets.flatMap((target) => {
+    const value = target.type === "domain"
+      ? normalizeReputationDomain(target.value)
+      : target.type === "hash"
+        ? normalizeReputationHash(target.value)
+        : target.value.trim().toLowerCase();
+    if (!value || (target.type === "ip" && !isPublicIp(value))) return [];
+    const normalizedTarget = { ...target, value };
+    return [[gtiCacheKey(value, target.type), normalizedTarget] as const];
+  })).values()];
   if (!apiKey) {
     for (const target of uniqueTargets) {
       results.set(gtiCacheKey(target.value, target.type), {
@@ -1680,49 +2344,66 @@ async function fetchGtiReputations(targets: GtiLookupTarget[], apiKey: string): 
 }
 
 async function fetchGtiReputation(value: string, type: "ip" | "domain" | "hash", apiKey: string): Promise<GtiLookupResult> {
-  try {
-    const collection = type === "ip" ? "ip_addresses" : type === "domain" ? "domains" : "files";
-    const url = `https://www.virustotal.com/api/v3/${collection}/${encodeURIComponent(value)}`;
-    let response = await fetchGtiUrl(url, apiKey);
-    if ([503, 504].includes(response.status)) {
-      await wait(350);
-      response = await fetchGtiUrl(url, apiKey);
+  const collection = type === "ip" ? "ip_addresses" : type === "domain" ? "domains" : "files";
+  const url = `https://www.virustotal.com/api/v3/${collection}/${encodeURIComponent(value)}`;
+  let lastFailure = "GTI/VT could not be reached.";
+  let attemptsUsed = 0;
+
+  for (let attempt = 1; attempt <= GTI_MAX_ATTEMPTS; attempt += 1) {
+    attemptsUsed = attempt;
+    try {
+      const response = await fetchGtiUrl(url, apiKey);
+      if (response.ok) {
+        return {
+          gti: parseGtiReputationResponse(await response.json()),
+          gtiStatus: "scored",
+          gtiMessage: "Reputation retrieved from GTI/VT."
+        };
+      }
+      const message = await readGtiErrorMessage(response);
+      if (response.status === 401 || response.status === 403) {
+        return { gtiStatus: "unauthorized", gtiMessage: message || "The configured GTI/VT API key was rejected." };
+      }
+      if (response.status === 404) {
+        return { gtiStatus: "not_found", gtiMessage: message || "GTI/VT has no report for this indicator." };
+      }
+      if (response.status === 429) {
+        const retryAfter = readRetryAfter(response.headers.get("retry-after"));
+        gtiRateLimitedUntil = Date.now() + retryAfter;
+        return { gtiStatus: "rate_limited", gtiMessage: message || "GTI/VT request quota reached; retry is automatic." };
+      }
+      lastFailure = message || `GTI/VT returned HTTP ${response.status}.`;
+      if (!GTI_TRANSIENT_HTTP_STATUSES.has(response.status) || attempt === GTI_MAX_ATTEMPTS) break;
+      await wait(readTransientRetryDelay(response.headers.get("retry-after"), attempt));
+    } catch (error) {
+      lastFailure = error instanceof DOMException && error.name === "AbortError"
+        ? `GTI/VT request timed out after ${GTI_REQUEST_TIMEOUT_MS / 1000} seconds.`
+        : error instanceof Error ? error.message : "GTI/VT could not be reached.";
+      if (attempt === GTI_MAX_ATTEMPTS) break;
+      await wait(transientRetryDelay(attempt));
     }
-    if (response.ok) {
-      return {
-        gti: parseGtiReputationResponse(await response.json()),
-        gtiStatus: "scored",
-        gtiMessage: "Reputation retrieved from GTI/VT."
-      };
-    }
-    const message = await readGtiErrorMessage(response);
-    if (response.status === 401 || response.status === 403) {
-      return { gtiStatus: "unauthorized", gtiMessage: message || "The configured GTI/VT API key was rejected." };
-    }
-    if (response.status === 404) {
-      return { gtiStatus: "not_found", gtiMessage: message || "GTI/VT has no report for this indicator." };
-    }
-    if (response.status === 429) {
-      const retryAfter = readRetryAfter(response.headers.get("retry-after"));
-      gtiRateLimitedUntil = Date.now() + retryAfter;
-      return { gtiStatus: "rate_limited", gtiMessage: message || "GTI/VT request quota reached; retry is automatic." };
-    }
-    return { gtiStatus: "unavailable", gtiMessage: message || `GTI/VT returned HTTP ${response.status}.` };
-  } catch (error) {
-    return {
-      gtiStatus: "unavailable",
-      gtiMessage: error instanceof Error ? error.message : "GTI/VT could not be reached."
-    };
   }
+
+  return {
+    gtiStatus: "unavailable",
+    gtiMessage: `${lastFailure} Failed after ${attemptsUsed} ${attemptsUsed === 1 ? "attempt" : "attempts"}.`
+  };
 }
 
-function fetchGtiUrl(url: string, apiKey: string): Promise<Response> {
-  return fetch(url, {
-    headers: {
-      "x-apikey": apiKey,
-      "x-tool": "SOC-WatchBridge"
-    }
-  });
+async function fetchGtiUrl(url: string, apiKey: string): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), GTI_REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(url, {
+      headers: {
+        "x-apikey": apiKey,
+        "x-tool": "SOC-WatchBridge"
+      },
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function gtiCacheKey(value: string, type: GtiLookupTarget["type"]): string {
@@ -1751,6 +2432,18 @@ function readRetryAfter(value: string | null): number {
   if (Number.isFinite(seconds) && seconds >= 0) return Math.max(60_000, Math.min(seconds * 1000, GTI_FAILURE_TTL_MS));
   const date = Date.parse(value);
   return Number.isFinite(date) ? Math.max(60_000, Math.min(date - Date.now(), GTI_FAILURE_TTL_MS)) : GTI_FAILURE_TTL_MS;
+}
+
+function transientRetryDelay(attempt: number): number {
+  return Math.min(3_000, 500 * (2 ** (attempt - 1)));
+}
+
+function readTransientRetryDelay(value: string | null, attempt: number): number {
+  if (!value) return transientRetryDelay(attempt);
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.max(250, Math.min(seconds * 1000, 3_000));
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(250, Math.min(date - Date.now(), 3_000)) : transientRetryDelay(attempt);
 }
 
 async function readGtiErrorMessage(response: Response): Promise<string> {
@@ -1840,7 +2533,7 @@ function isPublicIp(value: string): boolean {
   }
   const parts = value.split(".").map((part) => Number(part));
   if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
-  const [first, second] = parts;
+  const [first = 0, second = 0] = parts;
   if (first === 10 || first === 127 || first === 0) return false;
   if (first === 172 && second >= 16 && second <= 31) return false;
   if (first === 192 && second === 168) return false;
@@ -1857,7 +2550,7 @@ function isPrivateIp(value: string): boolean {
   }
   const parts = value.split(".").map((part) => Number(part));
   if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
-  const [first, second] = parts;
+  const [first = 0, second = 0] = parts;
   return first === 10
     || (first === 172 && second >= 16 && second <= 31)
     || (first === 192 && second === 168);
@@ -1998,7 +2691,7 @@ async function kibanaTabFetchJson(
             "content-type": "application/json",
             "kbn-xsrf": "soc-watch"
           },
-          body: body ?? undefined
+          ...(body === null ? {} : { body })
         });
         const contentType = response.headers.get("content-type") ?? "";
         const text = await response.text();

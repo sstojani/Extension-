@@ -27,7 +27,7 @@ describe("Threat Radar finding history", () => {
   });
 
   it("keeps retained enrichment when the next observation has no new reputation result", () => {
-    const previous = [{
+    const previous: Array<HistoricalFinding & { gti?: { threatScore: number; malicious: number } }> = [{
       ...base,
       gti: { threatScore: 82, malicious: 7 },
       firstSeen: "2026-09-08T10:00:00.000Z",

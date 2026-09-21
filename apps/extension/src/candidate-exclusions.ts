@@ -1,4 +1,4 @@
-type ExclusionCandidate = {
+export type ExclusionCandidate = {
   type?: string;
   normalized?: string;
   ip?: string;
@@ -6,18 +6,30 @@ type ExclusionCandidate = {
   destinationIp?: string;
   values?: string[];
   text?: string;
+  fields?: Record<string, string | string[] | undefined>;
 };
 
-type ExclusionRule = { scope: "ip" | "domain" | "hash" | "keyword" | "value"; value: string };
+export type CandidateException = {
+  id: string;
+  scope: "ip" | "domain" | "hash" | "identity" | "keyword" | "value";
+  value: string;
+  field?: string | undefined;
+  reason?: string | undefined;
+  expiresAt?: string | undefined;
+  enabled: boolean;
+  createdAt: string;
+};
 
-export function isExcludedCandidate(candidate: ExclusionCandidate, entries: string[]): boolean {
+type ExclusionRule = { scope: CandidateException["scope"]; value: string };
+
+export function isExcludedCandidate(candidate: ExclusionCandidate, entries: string[], exceptions: CandidateException[] = [], now = Date.now()): boolean {
   const rules = entries.map(parseRule).filter((rule): rule is ExclusionRule => rule !== undefined);
   const values = [candidate.normalized, candidate.ip, candidate.sourceIp, candidate.destinationIp, ...(candidate.values ?? [])]
     .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     .map((value) => value.trim().toLowerCase());
   const text = `${candidate.text ?? ""} ${values.join(" ")}`.toLowerCase();
 
-  return rules.some((rule) => {
+  const matchesLegacyRule = rules.some((rule) => {
     if (rule.scope === "keyword") return text.includes(rule.value);
     if (rule.scope === "ip") return values.some((value) => matchesIpRule(value, rule.value));
     if (rule.scope === "domain") return candidate.type === "domain" || candidate.type === "url"
@@ -26,6 +38,53 @@ export function isExcludedCandidate(candidate: ExclusionCandidate, entries: stri
     if (rule.scope === "hash") return ["md5", "sha1", "sha256"].includes(candidate.type ?? "") && values.includes(rule.value);
     return values.includes(rule.value);
   });
+  if (matchesLegacyRule) return true;
+
+  return exceptions.some((exception) => {
+    if (!exception.enabled || !isExceptionActive(exception, now)) return false;
+    if (exception.field) {
+      const fieldValues = toValues(candidate.fields?.[exception.field]);
+      return matchesExceptionValue(
+        exception.scope,
+        exception.value,
+        candidate.type,
+        `${text} ${fieldValues.join(" ")}`,
+        fieldValues
+      );
+    }
+    return matchesExceptionValue(exception.scope, exception.value, candidate.type, text, values);
+  });
+}
+
+export function isExceptionActive(exception: Pick<CandidateException, "expiresAt">, now = Date.now()): boolean {
+  if (!exception.expiresAt) return true;
+  const expiry = Date.parse(exception.expiresAt);
+  return Number.isFinite(expiry) && expiry > now;
+}
+
+function matchesExceptionValue(
+  scope: CandidateException["scope"],
+  target: string,
+  candidateType: string | undefined,
+  text: string,
+  values: string[] = []
+): boolean {
+  const normalizedTarget = target.trim().toLowerCase();
+  if (!normalizedTarget) return false;
+  if (scope === "keyword") return text.includes(normalizedTarget);
+  if (scope === "ip") return values.some((value) => matchesIpRule(value, normalizedTarget));
+  if (scope === "domain") return ["domain", "url"].includes(candidateType ?? "")
+    && values.some((value) => matchesDomainRule(value, normalizedTarget));
+  if (scope === "hash") return ["md5", "sha1", "sha256", "hash"].includes(candidateType ?? "")
+    && values.includes(normalizedTarget);
+  if (scope === "identity") return candidateType === "identity" && values.includes(normalizedTarget);
+  return values.includes(normalizedTarget);
+}
+
+function toValues(value: string | string[] | undefined): string[] {
+  return (Array.isArray(value) ? value : typeof value === "string" ? [value] : [])
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
 }
 
 function parseRule(entry: string): ExclusionRule | undefined {
@@ -36,7 +95,7 @@ function parseRule(entry: string): ExclusionRule | undefined {
     const scope = trimmed.slice(0, separator);
     const value = trimmed.slice(separator + 1).trim();
     if (!value) return undefined;
-    if (scope === "ip" || scope === "domain" || scope === "hash" || scope === "keyword") return { scope, value };
+    if (scope === "ip" || scope === "domain" || scope === "hash" || scope === "identity" || scope === "keyword") return { scope, value };
   }
   return ipv4OrCidrPattern.test(trimmed) ? { scope: "ip", value: trimmed } : { scope: "value", value: trimmed };
 }
@@ -46,7 +105,7 @@ const ipv4OrCidrPattern = /^\d{1,3}(?:\.\d{1,3}){3}(?:\/\d{1,2})?$/;
 function matchesIpRule(value: string, rule: string): boolean {
   if (!ipv4OrCidrPattern.test(value) || !ipv4OrCidrPattern.test(rule)) return value === rule;
   if (!rule.includes("/")) return value === rule;
-  const [network, prefixValue] = rule.split("/");
+  const [network = "", prefixValue = ""] = rule.split("/");
   const prefix = Number(prefixValue);
   if (!Number.isInteger(prefix) || prefix < 0 || prefix > 32) return false;
   const candidate = ipv4ToNumber(value);
@@ -67,7 +126,7 @@ function matchesDomainRule(value: string, rule: string): boolean {
 }
 
 function ipv4ToNumber(value: string): number | undefined {
-  const parts = value.split("/")[0].split(".").map(Number);
+  const parts = (value.split("/")[0] ?? "").split(".").map(Number);
   if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return undefined;
-  return (((parts[0] << 24) >>> 0) + (parts[1] << 16) + (parts[2] << 8) + parts[3]) >>> 0;
+  return parts.reduce((result, part) => ((result << 8) + part) >>> 0, 0);
 }

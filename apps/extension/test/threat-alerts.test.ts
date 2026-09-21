@@ -55,4 +55,50 @@ describe("Threat Radar alerts", () => {
     };
     expect(buildThreatAlertCandidates({ suspects: [finding] }, [])).toHaveLength(0);
   });
+
+  it("does not alert again for findings retained only as history", () => {
+    const historicalFinding = {
+      ip: "203.0.113.10",
+      role: "source" as const,
+      direction: "inbound" as const,
+      score: 90,
+      sourceIp: "203.0.113.10",
+      destinationIp: "10.0.0.5",
+      events: 900,
+      dangerousPorts: [22],
+      actions: [{ key: "denied", count: 850 }],
+      deniedEvents: 850,
+      outboundEvents: 0,
+      matchedKeywords: [],
+      reasons: ["Retained from history"],
+      active: false
+    };
+
+    expect(buildThreatAlertCandidates({ suspects: [historicalFinding] }, [rule])).toHaveLength(0);
+  });
+
+  it("auto-alerts on a promoted identity authentication anomaly", () => {
+    const candidates = buildThreatAlertCandidates({
+      identityAnomalies: [{
+        identity: "logrhythm@apdurres",
+        score: 88,
+        severity: "critical",
+        events: 81,
+        failedEvents: 80,
+        successfulEvents: 1,
+        sourceIp: "203.0.113.9",
+        destinationIp: "10.0.0.5",
+        promoted: true,
+        reasons: ["Failures and successes occurred in the same window; ordering is not verified"]
+      }]
+    }, []);
+
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({
+      category: "identity_risk",
+      indicatorType: "identity",
+      indicator: "logrhythm@apdurres",
+      severity: "critical"
+    });
+  });
 });

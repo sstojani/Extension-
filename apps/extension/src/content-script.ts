@@ -2,19 +2,24 @@ var socWatchBridgeWindow = window as unknown as { __socWatchBridgeRelayActive?: 
 
 if (isAllowedSocWatchOrigin(window.location) && !socWatchBridgeWindow.__socWatchBridgeRelayActive) {
   socWatchBridgeWindow.__socWatchBridgeRelayActive = true;
+  const extensionManifest = chrome.runtime.getManifest();
   let port: chrome.runtime.Port | null = null;
   let reconnectTimer: number | undefined;
   const queuedMessages: unknown[] = [];
 
   announce({
     type: "soc-watch.relay-ready",
-    extensionId: chrome.runtime.id
+    extensionId: chrome.runtime.id,
+    extensionName: extensionManifest.name,
+    extensionVersion: extensionManifest.version
   });
 
   const readyInterval = window.setInterval(() => {
     announce({
       type: "soc-watch.relay-ready",
-      extensionId: chrome.runtime.id
+      extensionId: chrome.runtime.id,
+      extensionName: extensionManifest.name,
+      extensionVersion: extensionManifest.version
     });
   }, 500);
 
@@ -31,7 +36,9 @@ if (isAllowedSocWatchOrigin(window.location) && !socWatchBridgeWindow.__socWatch
     if (isHello(data.message)) {
       announce({
         type: "soc-watch.relay-ready",
-        extensionId: chrome.runtime.id
+        extensionId: chrome.runtime.id,
+        extensionName: extensionManifest.name,
+        extensionVersion: extensionManifest.version
       });
       sendToBridge({ type: "soc-watch.requestSnapshot" });
       return;

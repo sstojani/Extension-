@@ -1,14 +1,14 @@
 {
   "name": "@soc-watch/extension",
-  "version": "0.8.1",
+  "version": "0.12.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "vite build --configLoader runner && node scripts/copy-manifest.mjs",
+    "build": "vite build --configLoader runner && node scripts/copy-manifest.mjs && node ../../scripts/package-extension.mjs",
     "dev:watch": "node scripts/watch-build.mjs",
     "lint": "tsc -p tsconfig.json --noEmit",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "node scripts/run-tests.mjs"
   },
   "dependencies": {
     "@soc-watch/ioc": "0.1.0",

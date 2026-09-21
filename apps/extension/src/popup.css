@@ -38,6 +38,15 @@ body {
   border-color: #38bdf8;
 }
 
+.popup.error .connect {
+  background: #ef4444;
+  color: #ffffff;
+}
+
+.popup.checking .connect {
+  background: #38bdf8;
+}
+
 header {
   display: flex;
   gap: 12px;

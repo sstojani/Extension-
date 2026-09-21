@@ -7,16 +7,23 @@ import {
   ArrowUp,
   ArrowUpDown,
   Bell,
+  BriefcaseBusiness,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Copy,
   ExternalLink,
   Database,
+  Download,
   FileSearch,
+  FolderOpen,
   Gauge,
   ListChecks,
   MonitorCog,
+  MessageSquare,
   Play,
   Plus,
+  Puzzle,
   Radar,
   RefreshCw,
   Search,
@@ -29,22 +36,37 @@ import {
 import type { FleetSummary, KibanaStatus } from "@soc-watch/protocol";
 import type { DataViewSummary, SanitizedFleetAgent } from "@soc-watch/protocol";
 import type { ClassifiedIOC } from "@soc-watch/ioc";
-import { connectBridgeStream, getExtensionId, saveExtensionId, sendBridgeMessage, type BridgeStream } from "./bridge";
+import { connectBridgeStream, detectBridgeExtension, getExtensionId, saveExtensionId, sendBridgeMessage, type BridgeStream } from "./bridge";
+import webPackage from "../package.json";
 import "./styles.css";
 
-type Panel = "Dashboard" | "Infrastructure" | "Agents" | "IOC Search" | "IOC Hunt" | "Threat Radar" | "Logs" | "Watchlist" | "Alerts" | "Settings" | "Diagnostics";
+type Panel = "Dashboard" | "Infrastructure" | "Agents" | "IOC Search" | "IOC Hunt" | "Threat Radar" | "Logs" | "Watchlist" | "Alerts" | "Cases" | "Settings" | "Diagnostics";
 type HuntStatus = "idle" | "running" | "complete";
 type HuntTimeRange = "today" | "last7d" | "last30d";
 type HuntFilter = "all" | "ip" | "domain" | "url" | "hash";
 type RadarTimeRange = "last15m" | "last1h" | "today";
 type RadarViewMode = "automatic" | "manual";
 type RadarSortDirection = "asc" | "desc";
-type RadarSortField = "sourceIp" | "destinationIp" | "score" | "gti" | "events" | "denied" | "outbound" | "infrastructure" | "ports" | "reasons" | "history";
+type RadarSortField = "sourceIp" | "destinationIp" | "score" | "gti" | "events" | "denied" | "outbound" | "bytes" | "infrastructure" | "ports" | "reasons" | "history";
 type RadarSort = { field: RadarSortField; direction: RadarSortDirection };
+type IdentitySortField = "account" | "sourceIp" | "destination" | "events" | "failures" | "successes" | "infrastructure" | "firstSeen" | "lastSeen" | "score" | "evidence";
+type IdentitySort = { field: IdentitySortField; direction: RadarSortDirection };
 type GtiLookupStatus = "scored" | "not_configured" | "pending" | "not_found" | "rate_limited" | "unauthorized" | "unavailable";
-type RadarCardId = "sources" | "destinations" | "outbound" | "denied" | "ports" | "indicators" | "review";
+type RadarCardId = "identity" | "sources" | "destinations" | "outbound" | "denied" | "ports" | "indicators" | "review";
 type SettingsView = "agent" | "allowlist" | "integrations" | "dataViews" | "connection";
-type AllowlistScope = "ip" | "domain" | "hash" | "keyword";
+type LiveConnectionState = "checking" | "connected" | "degraded" | "disconnected";
+type ExtensionPresence = "checking" | "installed" | "missing";
+type AllowlistScope = "ip" | "domain" | "hash" | "identity" | "keyword" | "value";
+type CandidateException = {
+  id: string;
+  scope: AllowlistScope;
+  value: string;
+  field?: string;
+  reason?: string;
+  expiresAt?: string;
+  enabled: boolean;
+  createdAt: string;
+};
 type RadarLayoutItem = { id: RadarCardId; width?: number; height?: number; x?: number; y?: number };
 type SearchHitSummary = {
   index: string;
@@ -102,6 +124,7 @@ type ThreatRadarSuspect = {
   gtiIp: string;
   role: "source" | "destination";
   direction: "inbound" | "outbound" | "internal" | "external" | "unknown";
+  evidenceScope?: "entity" | "source_destination";
   score: number;
   severity: "critical" | "high" | "medium" | "low";
   events: number;
@@ -115,6 +138,7 @@ type ThreatRadarSuspect = {
   deniedEvents: number;
   successfulEvents: number;
   outboundEvents: number;
+  outboundBytes?: number;
   suspiciousKeywordHits: number;
   matchedKeywords: string[];
   signalCounts?: Record<string, number>;
@@ -172,6 +196,62 @@ type ThreatRadarIndicator = {
   gtiCached?: boolean;
   gti?: ThreatRadarSuspect["gti"];
 };
+type ThreatRadarIdentityAnomaly = {
+  id?: string;
+  identity?: string;
+  rawIdentity?: string;
+  identityType?: "email" | "account" | "service_account";
+  account?: string;
+  email?: string;
+  user?: string;
+  userName?: string;
+  sourceIp?: string;
+  destinationIp?: string;
+  destination?: string;
+  service?: string;
+  destinationService?: string;
+  events?: number;
+  authenticationEvents?: number;
+  failures?: number;
+  failedEvents?: number;
+  successes?: number;
+  successfulEvents?: number;
+  infrastructureCount?: number;
+  infrastructures?: number | string[];
+  sourceIpCount?: number;
+  sourceIps?: string[];
+  destinationPorts?: number[];
+  actions?: Array<{ key: string; count: number }>;
+  datasets?: Array<{ key: string; count: number }>;
+  firstSeen?: string;
+  lastSeen?: string;
+  score?: number;
+  severity?: "critical" | "high" | "medium" | "low";
+  promoted?: boolean;
+  baselineObservations?: number;
+  offHours?: boolean;
+  evidence?: string | string[];
+  reasons?: string[];
+};
+type IdentityAnomalyRow = {
+  id: string;
+  account: string;
+  email: string;
+  sourceIp: string;
+  destination: string;
+  service: string;
+  events: number;
+  failures: number;
+  successes: number;
+  infrastructureCount: number;
+  firstSeen: string;
+  lastSeen: string;
+  score: number;
+  severity: "critical" | "high" | "medium" | "low";
+  promoted: boolean;
+  baselineObservations: number;
+  evidence: string[];
+};
 type ThreatRadarResponse = {
   from: string;
   to: string;
@@ -184,6 +264,7 @@ type ThreatRadarResponse = {
   deniedActivity: ThreatRadarSuspect[];
   reviewCandidates?: ThreatRadarSuspect[];
   suspiciousIndicators: ThreatRadarIndicator[];
+  identityAnomalies?: ThreatRadarIdentityAnomaly[];
   signals: Array<{ key: string; label: string; count: number }>;
   gtiEnabled: boolean;
   analysis?: {
@@ -192,6 +273,9 @@ type ThreatRadarResponse = {
     completedStages: string[];
     skippedStages: string[];
     candidatesEvaluated?: number;
+    ipCandidatesEvaluated?: number;
+    indicatorCandidatesEvaluated?: number;
+    identityCandidatesEvaluated?: number;
     candidatesForReview?: number;
     candidateMethods?: string[];
     reputation?: {
@@ -201,7 +285,36 @@ type ThreatRadarResponse = {
       cached: number;
       pending: number;
       rateLimited: number;
+      notFound?: number;
+      unauthorized?: number;
+      unavailable?: number;
       failed: number;
+      failureReasons?: Array<{ message: string; count: number }>;
+    };
+    scanId?: string;
+    scanMode?: "automatic" | "manual";
+    detectionPackVersion?: string;
+    detectionCoverage?: Array<{
+      id: string;
+      label: string;
+      description: string;
+      techniques: string[];
+      evidenceFields: string[];
+      activeCount: number;
+      status: "active" | "watching";
+    }>;
+    dataHealth?: {
+      status: "healthy" | "partial" | "unavailable";
+      indexPattern: string;
+      from: string;
+      to: string;
+      events: number;
+      exactEventCount: boolean;
+      fields: Array<{ key: string; label: string; coverage: number; events: number }>;
+      completedStages: string[];
+      skippedStages: string[];
+      tookMs?: number;
+      message?: string;
     };
   };
   summary: {
@@ -221,15 +334,38 @@ type ThreatRadarAgentConfig = {
   indexPattern: string;
   timestampField: string;
   candidateExclusions: string[];
+  candidateExceptions: CandidateException[];
+};
+type ThreatRadarScanRun = {
+  id: string;
+  mode: "automatic" | "manual";
+  status: "running" | "healthy" | "partial" | "error";
+  startedAt: string;
+  completedAt?: string;
+  from?: string;
+  to?: string;
+  eventsAnalyzed: number;
+  candidates: number;
+  alertsCreated: number;
+  notificationsSent: number;
+  notificationsFailed: number;
+  completedStages: string[];
+  skippedStages: string[];
+  error?: string;
+  detectionPackVersion: string;
 };
 type ThreatRadarAgentState = {
-  status?: "healthy" | "error" | "running" | "disabled";
+  status?: "healthy" | "partial" | "error" | "running" | "disabled";
   startedAt?: string;
   completedAt?: string;
   candidates?: number;
   alertsCreated?: number;
   lastError?: string;
   report?: ThreatRadarResponse;
+  scanHistory?: ThreatRadarScanRun[];
+  notificationsSent?: number;
+  notificationsFailed?: number;
+  suppressedAlerts?: number;
 };
 type BridgeConfigResponse = {
   extensionVersion?: string;
@@ -242,7 +378,7 @@ type BridgeConfigResponse = {
 type AlertRule = {
   id: string;
   name: string;
-  indicatorType: "ip" | "domain" | "hash";
+  indicatorType: "ip" | "domain" | "hash" | "identity";
   indicatorValue: string;
   minScore: number;
   enabled: boolean;
@@ -252,14 +388,29 @@ type AlertDelivery = {
   browser: "sent" | "disabled" | "failed";
   discord: "sent" | "disabled" | "failed";
   telegram: "sent" | "disabled" | "failed";
+  browserPermission?: "granted" | "denied" | "unavailable";
+  browserNotificationId?: string;
+  browserAttemptedAt?: string;
   errors: string[];
+};
+type ThreatFeedbackDisposition = "confirmed_malicious" | "benign" | "expected_scanner" | "expected_service" | "needs_review";
+type ThreatFeedbackRecord = {
+  id: string;
+  targetKind: "alert" | "finding" | "indicator" | "identity";
+  targetFingerprint: string;
+  disposition: ThreatFeedbackDisposition;
+  reason?: string;
+  analyst?: string;
+  createdAt: string;
+  expiresAt?: string;
 };
 type AlertHistoryItem = {
   id: string;
+  fingerprint: string;
   title: string;
   category: string;
   severity: "critical" | "high";
-  indicatorType: "ip" | "domain" | "hash";
+  indicatorType: "ip" | "domain" | "hash" | "identity";
   indicator: string;
   sourceIp?: string;
   destinationIp?: string;
@@ -273,6 +424,23 @@ type AlertHistoryItem = {
   occurrences: number;
   delivery: AlertDelivery;
 };
+type ThreatCaseStatus = "open" | "acknowledged" | "in_progress" | "resolved" | "closed";
+type ThreatCase = {
+  id: string;
+  title: string;
+  status: ThreatCaseStatus;
+  severity: "critical" | "high" | "medium" | "low";
+  createdAt: string;
+  updatedAt: string;
+  assignee?: string;
+  summary: string;
+  alertIds: string[];
+  fingerprints: string[];
+  tags: string[];
+  evidence: Array<{ label: string; value: string }>;
+  notes: Array<{ id: string; body: string; author?: string; createdAt: string }>;
+  resolution?: string;
+};
 type AlertDashboardResponse = {
   config: {
     browserNotifications: boolean;
@@ -280,12 +448,31 @@ type AlertDashboardResponse = {
     telegramConfigured: boolean;
     cooldownMinutes: number;
   };
+  diagnostics?: {
+    browser?: {
+      enabled: boolean;
+      apiAvailable: boolean;
+      permission: "granted" | "denied" | "unavailable";
+      status: "ready" | "disabled" | "blocked" | "sent" | "failed";
+      checkedAt: string;
+      iconUrl: string | null;
+      lastAttemptAt: string | null;
+      lastSuccessAt: string | null;
+      lastNotificationId: string | null;
+      lastError: string | null;
+    };
+  };
   rules: AlertRule[];
   history: AlertHistoryItem[];
+  feedback: ThreatFeedbackRecord[];
+  cases: ThreatCase[];
 };
 
 const DAILY_HUNT_BATCH_SIZE = 500;
-const SOC_WATCH_WEB_VERSION = "0.8.1";
+const SOC_WATCH_WEB_VERSION = webPackage.version;
+const CURRENT_DETECTION_PACK_VERSION = "2.0.1";
+const ANALYST_FEEDBACK_SUPPRESSION_MS = 7 * 24 * 60 * 60 * 1000;
+const IDENTITY_AUTH_SIGNAL_KEY = "identity_auth";
 const THREAT_RADAR_LAYOUT_KEY = "socWatchThreatRadarLayout";
 const THREAT_RADAR_PINNED_ANALYSIS_KEY = "socWatchThreatRadarPinnedAnalysis";
 const IOC_HUNT_CURSOR_KEY = "socWatchIocHuntCursors";
@@ -300,6 +487,7 @@ const nav: Array<{ label: Panel; icon: React.ComponentType<{ size?: number }> }>
   { label: "Logs", icon: FileSearch },
   { label: "Watchlist", icon: ListChecks },
   { label: "Alerts", icon: Bell },
+  { label: "Cases", icon: BriefcaseBusiness },
   { label: "Settings", icon: Settings },
   { label: "Diagnostics", icon: Activity }
 ];
@@ -310,6 +498,9 @@ function App() {
   const [bridgeState, setBridgeState] = useState("Not checked");
   const [extensionVersion, setExtensionVersion] = useState<string | null>(null);
   const [streamState, setStreamState] = useState("Disconnected");
+  const [extensionPresence, setExtensionPresence] = useState<ExtensionPresence>("checking");
+  const [extensionInstallReason, setExtensionInstallReason] = useState("Checking this browser profile for SOC Watch Bridge.");
+  const [connectionState, setConnectionState] = useState<LiveConnectionState>("checking");
   const [kibana, setKibana] = useState<KibanaStatus | null>(null);
   const [fleet, setFleet] = useState<FleetSummary | null>(null);
   const [agents, setAgents] = useState<SanitizedFleetAgent[]>([]);
@@ -338,13 +529,14 @@ function App() {
   const [malwareBazaarAuthKeySaved, setMalwareBazaarAuthKeySaved] = useState(false);
   const [googleThreatIntelApiKey, setGoogleThreatIntelApiKey] = useState("");
   const [googleThreatIntelApiKeySaved, setGoogleThreatIntelApiKeySaved] = useState(false);
-  const [threatRadarAgent, setThreatRadarAgent] = useState<ThreatRadarAgentConfig>({ enabled: true, intervalMinutes: 15, indexPattern: "logs-*", timestampField: "@timestamp", candidateExclusions: [] });
+  const [threatRadarAgent, setThreatRadarAgent] = useState<ThreatRadarAgentConfig>({ enabled: true, intervalMinutes: 15, indexPattern: "logs-*", timestampField: "@timestamp", candidateExclusions: [], candidateExceptions: [] });
   const [threatRadarAgentState, setThreatRadarAgentState] = useState<ThreatRadarAgentState>({});
   const [savingThreatRadarAgent, setSavingThreatRadarAgent] = useState(false);
   const streamRef = useRef<BridgeStream | null>(null);
   const retryTimerRef = useRef<number | undefined>(undefined);
   const retryAttemptRef = useRef(0);
   const connectionGenerationRef = useRef(0);
+  const extensionDetectionGenerationRef = useRef(0);
 
   const fleetTotal = useMemo(() => (fleet ? fleet.online + fleet.offline + fleet.error + fleet.inactive : 0), [fleet]);
   const iocHuntReadyScreen = active === "IOC Hunt" && huntStatus === "idle" && huntResults.length === 0;
@@ -352,9 +544,9 @@ function App() {
   const isThreatRadarView = active === "Threat Radar";
 
   useEffect(() => {
-    startLiveBridge();
-    void loadBridgeConfig(false);
+    void verifyExtensionInstallation();
     return () => {
+      extensionDetectionGenerationRef.current += 1;
       if (retryTimerRef.current !== undefined) window.clearTimeout(retryTimerRef.current);
       streamRef.current?.disconnect();
     };
@@ -366,6 +558,53 @@ function App() {
     const refresh = window.setInterval(() => void loadBridgeConfig(true), 15000);
     return () => window.clearInterval(refresh);
   }, [active]);
+
+  async function verifyExtensionInstallation() {
+    const generation = extensionDetectionGenerationRef.current + 1;
+    extensionDetectionGenerationRef.current = generation;
+    setExtensionPresence("checking");
+    setExtensionInstallReason("Checking this browser profile for SOC Watch Bridge.");
+
+    const detection = await detectBridgeExtension();
+    if (generation !== extensionDetectionGenerationRef.current) return;
+
+    if (!detection.installed) {
+      setExtensionPresence("missing");
+      setExtensionInstallReason(detection.reason);
+      setBridgeState("Extension missing");
+      setStreamState("unavailable");
+      setConnectionState("disconnected");
+      setKibana(null);
+      setFleet(null);
+      setAgents([]);
+      return;
+    }
+
+    saveExtensionId(detection.extensionId);
+    setExtensionId(detection.extensionId);
+    setExtensionVersion(detection.extensionVersion ?? null);
+    setExtensionPresence("installed");
+    setExtensionInstallReason(`${detection.extensionName} ${detection.extensionVersion ? `v${detection.extensionVersion} ` : ""}detected.`);
+    setBridgeState("Extension ready");
+    setLastError(null);
+    startLiveBridge();
+    void loadBridgeConfig(false);
+  }
+
+  async function verifyExtensionStillInstalled() {
+    const detection = await detectBridgeExtension(1800);
+    if (detection.installed) return;
+    connectionGenerationRef.current += 1;
+    streamRef.current?.disconnect();
+    streamRef.current = null;
+    if (retryTimerRef.current !== undefined) {
+      window.clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = undefined;
+    }
+    retryAttemptRef.current = 0;
+    setExtensionPresence("missing");
+    setExtensionInstallReason(detection.reason);
+  }
 
   function startLiveBridge(options: { automatic?: boolean } = {}) {
     if (!options.automatic) retryAttemptRef.current = 0;
@@ -382,12 +621,16 @@ function App() {
         setStreamState(status);
         if (status === "connected") {
           retryAttemptRef.current = 0;
-          setBridgeState("Bridge connected");
-          setLastError(null);
+          setBridgeState("Extension ready");
           return;
         }
         if (status === "disconnected" || status === "unavailable") {
+          setBridgeState("Extension unavailable");
+          setConnectionState("disconnected");
+          setKibana(null);
+          setFleet(null);
           scheduleBridgeRetry(message ?? "SOC Watch Bridge disconnected.");
+          void verifyExtensionStillInstalled();
           return;
         }
         if (message) setLastError(message);
@@ -422,24 +665,45 @@ function App() {
   function applySnapshot(snapshot: unknown) {
     const record = typeof snapshot === "object" && snapshot !== null ? (snapshot as Record<string, unknown>) : {};
     setLastUpdated(typeof record.updatedAt === "string" ? record.updatedAt : new Date().toISOString());
-    if (record.state === "connected") {
-      setStreamState("connected");
-      setBridgeState("Bridge connected");
-      setKibana(record.kibana as KibanaStatus);
-      setFleet(record.fleet as FleetSummary);
-      if (Array.isArray(record.agents)) {
-        setAgents(record.agents as SanitizedFleetAgent[]);
-      }
+    setStreamState("connected");
+    setBridgeState("Extension ready");
+    const kibanaRecord = typeof record.kibana === "object" && record.kibana !== null
+      ? record.kibana as KibanaStatus
+      : null;
+    const authenticated = kibanaRecord?.overall === "available";
+    const reportedState = record.state === "connected" || record.state === "degraded" || record.state === "disconnected"
+      ? record.state
+      : "disconnected";
+    const effectiveState: LiveConnectionState = authenticated
+      ? reportedState === "connected" ? "connected" : "degraded"
+      : "disconnected";
+    setConnectionState(effectiveState);
+    setKibana(kibanaRecord);
+    setFleet(typeof record.fleet === "object" && record.fleet !== null ? record.fleet as FleetSummary : null);
+    setAgents(Array.isArray(record.agents) ? record.agents as SanitizedFleetAgent[] : []);
+
+    if (effectiveState === "connected") {
       setLastError(null);
       return;
     }
     const error = typeof record.error === "object" && record.error !== null ? (record.error as { message?: string; code?: string }) : undefined;
-    setLastError(error ? `${error.code ?? "ERROR"}: ${error.message ?? "Live bridge update failed."}` : "Live bridge update failed.");
+    const connection = typeof record.connection === "object" && record.connection !== null
+      ? record.connection as { message?: string }
+      : undefined;
+    setLastError(error
+      ? `${error.code ?? "KIBANA_UNREACHABLE"}: ${error.message ?? "Kibana verification failed."}`
+      : connection?.message ?? "Kibana authentication or Fleet access could not be verified.");
   }
 
   function saveAndReconnectExtensionId() {
     saveExtensionId(extensionId);
     startLiveBridge();
+  }
+
+  function saveInstallExtensionIdAndReload() {
+    const normalizedId = extensionId.trim();
+    if (normalizedId) saveExtensionId(normalizedId);
+    window.location.reload();
   }
 
   async function loadBridgeConfig(includeReport = false) {
@@ -449,7 +713,11 @@ function App() {
       setThreatFoxAuthKeySaved(Boolean(response.data.threatFoxAuthKeySaved));
       setMalwareBazaarAuthKeySaved(Boolean(response.data.malwareBazaarAuthKeySaved));
       setGoogleThreatIntelApiKeySaved(Boolean(response.data.googleThreatIntelApiKeySaved));
-      if (response.data.threatRadarAgent) setThreatRadarAgent(response.data.threatRadarAgent);
+      if (response.data.threatRadarAgent) setThreatRadarAgent({
+        ...response.data.threatRadarAgent,
+        candidateExclusions: response.data.threatRadarAgent.candidateExclusions ?? [],
+        candidateExceptions: response.data.threatRadarAgent.candidateExceptions ?? []
+      });
       if (response.data.threatRadarAgentState) {
         setThreatRadarAgentState(response.data.threatRadarAgentState);
       }
@@ -512,23 +780,42 @@ function App() {
 
   async function runProofCheck() {
     setLoading(true);
+    setConnectionState("checking");
     setLastError(null);
     const ping = await sendBridgeMessage("bridge.ping", {});
     if (!ping.success) {
-      setBridgeState("Bridge unavailable");
+      setBridgeState("Extension unavailable");
+      setConnectionState("disconnected");
+      setKibana(null);
+      setFleet(null);
       setLastError(ping.error.message);
+      if (ping.error.code === "BRIDGE_NOT_INSTALLED") void verifyExtensionStillInstalled();
       setLoading(false);
       return;
     }
-    setBridgeState("Bridge connected");
+    setBridgeState("Extension ready");
 
     const status = await sendBridgeMessage<unknown, KibanaStatus>("kibana.status", {});
-    if (status.success) setKibana(status.data);
-    else setLastError(status.error.message);
+    if (!status.success) {
+      setKibana({ overall: "unavailable" });
+      setFleet(null);
+      setAgents([]);
+      setConnectionState("disconnected");
+      setLastError(`${status.error.code}: ${status.error.message}`);
+      setLoading(false);
+      return;
+    }
+    setKibana(status.data);
 
     const summary = await sendBridgeMessage<unknown, FleetSummary>("fleet.summary", {});
-    if (summary.success) setFleet(summary.data);
-    else setLastError(summary.error.message);
+    if (summary.success) {
+      setFleet(summary.data);
+      setConnectionState("connected");
+    } else {
+      setFleet(null);
+      setConnectionState("degraded");
+      setLastError(`${summary.error.code}: ${summary.error.message}`);
+    }
     setLoading(false);
   }
 
@@ -641,7 +928,7 @@ function App() {
       timestampField: "@timestamp",
       from: timeRange.from,
       to: "now",
-      size: 20
+      size: 50
     });
     if (response.success) {
       if (!hasThreatRadarCoreCoverage(response.data)) {
@@ -669,6 +956,19 @@ function App() {
   const visibleRadarResult = radarViewMode === "manual" && pinnedRadarAnalysis
     ? pinnedRadarAnalysis.report
     : threatRadarAgentState.report ?? null;
+
+  if (extensionPresence !== "installed") {
+    return (
+      <ExtensionInstallGate
+        state={extensionPresence}
+        reason={extensionInstallReason}
+        extensionId={extensionId}
+        onExtensionIdChange={setExtensionId}
+        onCheckAgain={() => void verifyExtensionInstallation()}
+        onSaveAndReload={saveInstallExtensionIdAndReload}
+      />
+    );
+  }
 
   return (
     <main className="shell">
@@ -702,12 +1002,12 @@ function App() {
               <h1>{active}</h1>
             </div>
             <div className="top-actions">
-              <span className={`live-dot ${streamState === "connected" ? "healthy" : "unknown"}`}>
-                {streamState === "connected" ? "Live" : streamState}
+              <span className={`live-dot ${connectionState}`} role="status" aria-atomic="true">
+                {connectionState === "connected" ? "Kibana connected" : connectionState === "degraded" ? "Connection degraded" : connectionState === "checking" ? "Checking connection" : "Kibana disconnected"}
               </span>
-              <button className="primary" onClick={() => startLiveBridge()} disabled={loading}>
+              <button className={connectionState === "disconnected" ? "danger-action" : "primary"} onClick={() => void runProofCheck()} disabled={loading}>
                 <RefreshCw size={16} aria-hidden="true" className={loading ? "spin" : ""} />
-                <span>{loading ? "Checking" : "Reconnect"}</span>
+                <span>{loading ? "Checking" : "Check Connection"}</span>
               </button>
             </div>
           </header>
@@ -723,13 +1023,13 @@ function App() {
         ) : !hideIocHuntChrome ? (
           <>
             <section className="status-strip" aria-label="Current SOC Watch status">
-              <StatusTile label="Bridge" value={bridgeState} tone={bridgeState.includes("connected") ? "healthy" : "unknown"} />
-              <StatusTile label="Kibana" value={kibana?.overall ?? "Unknown"} tone={kibana?.overall === "available" ? "healthy" : "unknown"} />
-              <StatusTile label="Fleet Online" value={fleet ? String(fleet.online) : "--"} tone="healthy" />
+              <StatusTile label="Extension" value={bridgeState} tone={streamState === "connected" ? "healthy" : "critical"} />
+              <StatusTile label="Kibana" value={connectionState === "connected" || connectionState === "degraded" ? kibana?.overall ?? "Unavailable" : "Disconnected"} tone={connectionState === "connected" ? "healthy" : connectionState === "degraded" ? "unknown" : "critical"} />
+              <StatusTile label="Fleet Online" value={fleet ? String(fleet.online) : "--"} tone={fleet ? "healthy" : "unknown"} />
               <StatusTile label="Fleet Offline" value={fleet ? String(fleet.offline) : "--"} tone={fleet?.offline ? "critical" : "unknown"} />
             </section>
-            <section className="live-strip" aria-label="Live bridge connection">
-              <span>Fleet status and agent state update automatically every 10 seconds</span>
+            <section className={`live-strip ${connectionState === "connected" ? "healthy" : connectionState === "degraded" ? "degraded" : "disconnected"}`} aria-label="Live connection verification">
+              <span>{connectionState === "connected" ? "Kibana authentication and Fleet access are revalidated automatically every 10 seconds" : "Automatic checks are active; data stays unavailable until Kibana authentication is verified"}</span>
               <strong>{lastUpdated ? `Last update ${new Date(lastUpdated).toLocaleTimeString()}` : "Waiting for first update"}</strong>
             </section>
           </>
@@ -746,7 +1046,7 @@ function App() {
           </section>
         ) : null}
 
-        {active === "Dashboard" ? <Dashboard kibana={kibana} fleet={fleet} fleetTotal={fleetTotal} agents={agents} /> : null}
+        {active === "Dashboard" ? <Dashboard kibana={kibana} fleet={fleet} fleetTotal={fleetTotal} agents={agents} connectionState={connectionState} extensionReady={streamState === "connected"} /> : null}
         {active === "Agents" ? <Agents agents={agents} onRefresh={loadAgents} /> : null}
         {active === "Settings" ? (
           <SettingsPanel
@@ -818,8 +1118,154 @@ function App() {
           />
         ) : null}
         {active === "Alerts" ? <AlertsPanel /> : null}
-        {!["Dashboard", "Agents", "Settings", "IOC Search", "Infrastructure", "IOC Hunt", "Threat Radar", "Alerts"].includes(active) ? <Placeholder panel={active} /> : null}
+        {active === "Cases" ? <CasesPanel /> : null}
+        {active === "Diagnostics" ? <DiagnosticsPanel agentState={threatRadarAgentState} indexPattern={indexPattern} /> : null}
+        {!["Dashboard", "Agents", "Settings", "IOC Search", "Infrastructure", "IOC Hunt", "Threat Radar", "Alerts", "Cases", "Diagnostics"].includes(active) ? <Placeholder panel={active} /> : null}
       </section>
+    </main>
+  );
+}
+
+function ExtensionInstallGate({
+  state,
+  reason,
+  extensionId,
+  onExtensionIdChange,
+  onCheckAgain,
+  onSaveAndReload
+}: {
+  state: Exclude<ExtensionPresence, "installed">;
+  reason: string;
+  extensionId: string;
+  onExtensionIdChange: (value: string) => void;
+  onCheckAgain: () => void;
+  onSaveAndReload: () => void;
+}) {
+  const [copied, setCopied] = useState<"address" | "id" | null>(null);
+  const extensionAddress = "chrome://extensions";
+  const packageName = `soc-watch-bridge-v${SOC_WATCH_WEB_VERSION}.zip`;
+  const packageUrl = `${import.meta.env.BASE_URL}downloads/${packageName}`;
+
+  async function copyValue(value: string, target: "address" | "id") {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(target);
+      window.setTimeout(() => setCopied((current) => current === target ? null : current), 1800);
+    } catch {
+      setCopied(null);
+    }
+  }
+
+  if (state === "checking") {
+    return (
+      <main className="extension-gate checking" aria-busy="true">
+        <section className="extension-checking" role="status" aria-live="polite">
+          <ShieldCheck size={34} aria-hidden="true" />
+          <div>
+            <p className="eyebrow">SOC Watch setup</p>
+            <h1>Checking browser bridge</h1>
+            <p>{reason}</p>
+          </div>
+          <RefreshCw size={22} className="spin" aria-hidden="true" />
+        </section>
+      </main>
+    );
+  }
+
+  return (
+    <main className="extension-gate">
+      <header className="install-brand">
+        <span className="install-brand-mark"><ShieldCheck size={25} aria-hidden="true" /></span>
+        <div>
+          <strong>SOC Watch</strong>
+          <span>Secure browser bridge setup</span>
+        </div>
+        <span className="install-version">Web v{SOC_WATCH_WEB_VERSION}</span>
+      </header>
+
+      <section className="install-intro" aria-labelledby="extension-install-title">
+        <div>
+          <p className="eyebrow">Required component</p>
+          <h1 id="extension-install-title">Install SOC Watch Bridge</h1>
+          <p>The console is locked until the read-only browser bridge is present. Kibana credentials remain inside your authenticated Chrome session.</p>
+        </div>
+        <div className="install-missing-status" role="alert">
+          <AlertTriangle size={20} aria-hidden="true" />
+          <div>
+            <strong>Extension not detected</strong>
+            <span>{reason}</span>
+          </div>
+        </div>
+      </section>
+
+      <div className="install-layout">
+        <section className="install-instructions" aria-labelledby="install-steps-title">
+          <div className="install-section-heading">
+            <div>
+              <h2 id="install-steps-title">Installation</h2>
+              <p>Use the packaged build that matches this console.</p>
+            </div>
+            <a className="primary install-download" href={packageUrl} download={packageName}>
+              <Download size={17} aria-hidden="true" />
+              <span>Download Bridge v{SOC_WATCH_WEB_VERSION}</span>
+            </a>
+          </div>
+
+          <ol className="install-steps">
+            <li>
+              <span>1</span>
+              <div><strong>Extract the package</strong><p>Unzip <code>{packageName}</code> to a permanent folder. Do not load the ZIP itself.</p></div>
+            </li>
+            <li>
+              <span>2</span>
+              <div><strong>Open Chrome extensions</strong><p>Paste <code>{extensionAddress}</code> into the address bar and enable Developer mode.</p></div>
+              <button className="icon-button" type="button" title="Copy Chrome extensions address" aria-label="Copy Chrome extensions address" onClick={() => void copyValue(extensionAddress, "address")}>
+                {copied === "address" ? <CheckCircle2 size={18} aria-hidden="true" /> : <Copy size={18} aria-hidden="true" />}
+              </button>
+            </li>
+            <li>
+              <span>3</span>
+              <div><strong>Load the extracted extension</strong><p>Select <b>Load unpacked</b>, then choose the extracted folder containing <code>manifest.json</code>.</p></div>
+            </li>
+            <li>
+              <span>4</span>
+              <div><strong>Confirm the extension ID</strong><p>Copy the ID shown by Chrome and compare or paste it in the verification field.</p></div>
+            </li>
+          </ol>
+        </section>
+
+        <aside className="install-verification" aria-labelledby="verify-install-title">
+          <div className="install-verification-icon"><Puzzle size={24} aria-hidden="true" /></div>
+          <h2 id="verify-install-title">Verify installation</h2>
+          <p>Chrome must reload this page once after an unpacked extension is installed so the secure page relay can start.</p>
+
+          <dl className="install-package-facts">
+            <div><dt>Extension</dt><dd>SOC Watch Bridge</dd></div>
+            <div><dt>Package version</dt><dd>{SOC_WATCH_WEB_VERSION}</dd></div>
+            <div><dt>Required folder</dt><dd><FolderOpen size={15} aria-hidden="true" /> Extracted package</dd></div>
+          </dl>
+
+          <label className="field install-id-field">
+            <span>Extension ID fallback</span>
+            <div className="install-id-control">
+              <input value={extensionId} onChange={(event) => onExtensionIdChange(event.target.value)} placeholder="Paste the 32-character Chrome extension ID" spellCheck={false} />
+              <button className="icon-button" type="button" title="Copy extension ID" aria-label="Copy extension ID" disabled={!extensionId.trim()} onClick={() => void copyValue(extensionId.trim(), "id")}>
+                {copied === "id" ? <CheckCircle2 size={18} aria-hidden="true" /> : <Copy size={18} aria-hidden="true" />}
+              </button>
+            </div>
+            <small>Chrome may assign another ID to an unpacked install. The verified ID replaces this value automatically.</small>
+          </label>
+
+          <button className="primary install-verify" type="button" onClick={onSaveAndReload}>
+            <RefreshCw size={17} aria-hidden="true" />
+            <span>Reload and Verify</span>
+          </button>
+          <button className="secondary install-check-again" type="button" onClick={onCheckAgain}>
+            <ShieldCheck size={17} aria-hidden="true" />
+            <span>Check Again</span>
+          </button>
+        </aside>
+      </div>
     </main>
   );
 }
@@ -828,14 +1274,37 @@ function Dashboard({
   kibana,
   fleet,
   fleetTotal,
-  agents
+  agents,
+  connectionState,
+  extensionReady
 }: {
   kibana: KibanaStatus | null;
   fleet: FleetSummary | null;
   fleetTotal: number;
   agents: SanitizedFleetAgent[];
+  connectionState: LiveConnectionState;
+  extensionReady: boolean;
 }) {
   const problemAgents = agents.filter((agent) => agent.status === "offline" || agent.status === "error");
+  const proofSteps: Array<{ label: string; state: "healthy" | "critical" | "unknown"; detail: string }> = [
+    { label: "SOC Watch Web", state: "healthy", detail: "Running" },
+    { label: "Bridge Extension", state: extensionReady ? "healthy" : "critical", detail: extensionReady ? "Ready" : "Unavailable" },
+    {
+      label: "Kibana Session",
+      state: connectionState === "connected" || connectionState === "degraded" ? "healthy" : connectionState === "checking" ? "unknown" : "critical",
+      detail: connectionState === "connected" || connectionState === "degraded" ? "Authenticated" : connectionState === "checking" ? "Checking" : "Disconnected"
+    },
+    {
+      label: "Fleet API",
+      state: connectionState === "connected" ? "healthy" : connectionState === "checking" ? "unknown" : "critical",
+      detail: connectionState === "connected" ? "Verified" : connectionState === "checking" ? "Checking" : "Unavailable"
+    },
+    {
+      label: "Sanitized Counters",
+      state: connectionState === "connected" ? "healthy" : "unknown",
+      detail: connectionState === "connected" ? "Current" : "Withheld"
+    }
+  ];
   return (
     <section className="grid">
       {problemAgents.length > 0 ? (
@@ -863,8 +1332,11 @@ function Dashboard({
           <h2>Bridge Proof Path</h2>
         </div>
         <div className="flow" aria-label="SOC Watch bridge proof flow">
-          {["SOC Watch Web", "Bridge Extension", "Kibana Session", "Fleet API", "Sanitized Counters"].map((step) => (
-            <div className="flow-step" key={step}>{step}</div>
+          {proofSteps.map((step) => (
+            <div className={`flow-step ${step.state}`} key={step.label}>
+              <span>{step.label}</span>
+              <strong>{step.detail}</strong>
+            </div>
           ))}
         </div>
       </div>
@@ -1058,22 +1530,46 @@ function SettingsPanel({
   const [settingsView, setSettingsView] = useState<SettingsView>("agent");
   const [allowlistScope, setAllowlistScope] = useState<AllowlistScope>("ip");
   const [allowlistValue, setAllowlistValue] = useState("");
+  const [allowlistField, setAllowlistField] = useState("");
+  const [allowlistReason, setAllowlistReason] = useState("");
+  const [allowlistExpiry, setAllowlistExpiry] = useState("");
   const [allowlistError, setAllowlistError] = useState<string | null>(null);
 
   function addAllowlistEntry(event: React.FormEvent) {
     event.preventDefault();
     const values = allowlistValue.split(/[\n,]+/).map((value) => value.trim()).filter(Boolean);
-    const entries = values.map((value) => normalizeAllowlistEntry(allowlistScope, value));
-    const invalidIndex = entries.findIndex((entry) => entry === null);
+    const normalizedValues = values.map((value) => normalizeAllowlistValue(allowlistScope, value));
+    const invalidIndex = normalizedValues.findIndex((entry) => entry === null);
     if (values.length === 0 || invalidIndex >= 0) {
       setAllowlistError(values.length === 0 ? "Enter at least one value." : `Invalid ${allowlistScope}: ${values[invalidIndex]}`);
       return;
     }
+    const expiry = allowlistExpiry ? Date.parse(allowlistExpiry) : undefined;
+    if (expiry !== undefined && (!Number.isFinite(expiry) || expiry <= Date.now())) {
+      setAllowlistError("Expiry must be a future date and time.");
+      return;
+    }
+    const createdAt = new Date().toISOString();
+    const additions = (normalizedValues as string[]).map((value): CandidateException => ({
+      id: crypto.randomUUID(),
+      scope: allowlistScope,
+      value,
+      enabled: true,
+      createdAt,
+      ...(allowlistField.trim() ? { field: allowlistField.trim() } : {}),
+      ...(allowlistReason.trim() ? { reason: allowlistReason.trim() } : {}),
+      ...(expiry !== undefined ? { expiresAt: new Date(expiry).toISOString() } : {})
+    }));
     onThreatRadarAgentChange({
       ...threatRadarAgent,
-      candidateExclusions: [...new Set([...threatRadarAgent.candidateExclusions, ...(entries as string[])])]
+      candidateExceptions: [
+        ...threatRadarAgent.candidateExceptions.filter((entry) => !additions.some((addition) => addition.scope === entry.scope && addition.value === entry.value && addition.field === entry.field)),
+        ...additions
+      ]
     });
     setAllowlistValue("");
+    setAllowlistReason("");
+    setAllowlistExpiry("");
     setAllowlistError(null);
   }
 
@@ -1081,6 +1577,13 @@ function SettingsPanel({
     onThreatRadarAgentChange({
       ...threatRadarAgent,
       candidateExclusions: threatRadarAgent.candidateExclusions.filter((candidate) => candidate !== entry)
+    });
+  }
+
+  function removeCandidateException(id: string) {
+    onThreatRadarAgentChange({
+      ...threatRadarAgent,
+      candidateExceptions: threatRadarAgent.candidateExceptions.filter((entry) => entry.id !== id)
     });
   }
 
@@ -1178,15 +1681,16 @@ function SettingsPanel({
               <span>Run Scan Now</span>
             </button>
           </div>
+          <ScanHistoryTable runs={threatRadarAgentState.scanHistory ?? []} />
         </section>
         </> : null}
         {settingsView === "allowlist" ? <section className="allowlist-settings" aria-labelledby="allowlist-title">
           <div className="panel-actions">
             <div>
               <h2 id="allowlist-title">Detection Allowlist</h2>
-              <p className="muted">Trusted values are excluded from Threat Radar findings, investigation candidates, IOC Hunt matches, and automatic alerts.</p>
+              <p className="muted">Exceptions suppress matching automated findings while raw SIEM logs remain searchable. Add a reason and expiry for auditability.</p>
             </div>
-            <Badge value={`${threatRadarAgent.candidateExclusions.length} entries`} />
+            <Badge value={`${threatRadarAgent.candidateExclusions.length + threatRadarAgent.candidateExceptions.length} entries`} />
           </div>
           <form className="allowlist-editor" onSubmit={addAllowlistEntry}>
             <label className="field">
@@ -1195,7 +1699,9 @@ function SettingsPanel({
                 <option value="ip">IP or IPv4 CIDR</option>
                 <option value="domain">Domain</option>
                 <option value="hash">File hash</option>
+                <option value="identity">Account or email</option>
                 <option value="keyword">Activity keyword</option>
+                <option value="value">Exact value</option>
               </select>
             </label>
             <label className="field allowlist-value-field">
@@ -1207,22 +1713,45 @@ function SettingsPanel({
                 autoComplete="off"
               />
             </label>
+            <label className="field">
+              <span>ECS field condition</span>
+              <input value={allowlistField} onChange={(event) => setAllowlistField(event.target.value)} placeholder="Optional, for example user.name" autoComplete="off" />
+            </label>
+            <label className="field">
+              <span>Reason</span>
+              <input value={allowlistReason} onChange={(event) => setAllowlistReason(event.target.value)} placeholder="Approved scanner or expected service" maxLength={500} />
+            </label>
+            <label className="field">
+              <span>Expires</span>
+              <input type="datetime-local" value={allowlistExpiry} onChange={(event) => setAllowlistExpiry(event.target.value)} />
+            </label>
             <button className="secondary align-end" type="submit">
               <Plus size={16} aria-hidden="true" />
               <span>Add</span>
             </button>
           </form>
           {allowlistError ? <div className="field-error" role="alert">{allowlistError}</div> : null}
-          {threatRadarAgent.candidateExclusions.length > 0 ? (
+          {threatRadarAgent.candidateExclusions.length > 0 || threatRadarAgent.candidateExceptions.length > 0 ? (
             <div className="table-wrap allowlist-table-wrap">
               <table className="allowlist-table">
-                <thead><tr><th>Type</th><th>Value</th><th>Coverage</th><th>Remove</th></tr></thead>
-                <tbody>{threatRadarAgent.candidateExclusions.map((entry) => {
+                <thead><tr><th>Type</th><th>Value</th><th>Condition</th><th>Reason</th><th>Expires</th><th>Remove</th></tr></thead>
+                <tbody>{threatRadarAgent.candidateExceptions.map((entry) => (
+                  <tr key={entry.id}>
+                    <td><Badge value={entry.scope.toUpperCase()} /></td>
+                    <td className="mono-cell">{entry.value}</td>
+                    <td>{entry.field ?? "Any matching field"}</td>
+                    <td>{entry.reason ?? "No reason recorded"}</td>
+                    <td>{entry.expiresAt ? new Date(entry.expiresAt).toLocaleString() : "Never"}</td>
+                    <td><button className="icon-button danger-button" type="button" aria-label={`Remove ${entry.value} from allowlist`} onClick={() => removeCandidateException(entry.id)}><Trash2 size={16} aria-hidden="true" /></button></td>
+                  </tr>
+                ))}{threatRadarAgent.candidateExclusions.map((entry) => {
                   const parsed = parseAllowlistEntry(entry);
                   return <tr key={entry}>
                     <td><Badge value={parsed.scope.toUpperCase()} /></td>
                     <td className="mono-cell">{parsed.value}</td>
-                    <td>Threat Radar and IOC Hunt</td>
+                    <td>Legacy global exception</td>
+                    <td>Migrated from v0.9</td>
+                    <td>Never</td>
                     <td><button className="icon-button danger-button" type="button" aria-label={`Remove ${parsed.value} from allowlist`} onClick={() => removeAllowlistEntry(entry)}><Trash2 size={16} aria-hidden="true" /></button></td>
                   </tr>;
                 })}</tbody>
@@ -1308,7 +1837,42 @@ function formatThreatRadarAgentState(state: ThreatRadarAgentState): string {
   return "No scheduled scan has completed yet.";
 }
 
-function normalizeAllowlistEntry(scope: AllowlistScope, rawValue: string): string | null {
+function ScanHistoryTable({ runs }: { runs: ThreatRadarScanRun[] }) {
+  const recent = runs.slice(0, 8);
+  return (
+    <section className="scan-history" aria-labelledby="scan-history-title">
+      <div className="panel-title-row">
+        <div>
+          <h3 id="scan-history-title">Recent Scan Runs</h3>
+          <p className="muted">Manual and automatic runs keep separate IDs, coverage, and delivery counts.</p>
+        </div>
+        <Badge value={`${runs.length} retained`} />
+      </div>
+      {recent.length ? (
+        <div className="mini-table-wrap">
+          <table className="mini-ioc-table scan-history-table">
+            <thead><tr><th>Started</th><th>Mode</th><th>Status</th><th>Range</th><th>Events</th><th>Candidates</th><th>Alerts</th><th>Notifications</th><th>Pack</th></tr></thead>
+            <tbody>{recent.map((run) => (
+              <tr key={run.id} title={run.error}>
+                <td>{new Date(run.startedAt).toLocaleString()}</td>
+                <td>{run.mode}</td>
+                <td><Badge value={run.status} /></td>
+                <td className="mono-cell">{run.from ?? "--"} to {run.to ?? "--"}</td>
+                <td>{run.eventsAnalyzed.toLocaleString()}</td>
+                <td>{run.candidates}</td>
+                <td>{run.alertsCreated}</td>
+                <td>{run.notificationsSent} sent{run.notificationsFailed ? `, ${run.notificationsFailed} failed` : ""}</td>
+                <td>{run.detectionPackVersion}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      ) : <div className="empty-card"><strong>No scan ledger yet.</strong><span>The next manual or scheduled scan will create the first auditable run.</span></div>}
+    </section>
+  );
+}
+
+function normalizeAllowlistValue(scope: AllowlistScope, rawValue: string): string | null {
   const value = rawValue.trim().toLowerCase();
   if (!value || value.length > 240) return null;
   if (scope === "ip") {
@@ -1321,14 +1885,15 @@ function normalizeAllowlistEntry(scope: AllowlistScope, rawValue: string): strin
   }
   if (scope === "domain" && !/^(?=.{1,253}$)(?!-)(?:[a-z0-9-]{1,63}\.)+[a-z]{2,63}$/.test(value)) return null;
   if (scope === "hash" && !/^(?:[a-f0-9]{32}|[a-f0-9]{40}|[a-f0-9]{64})$/.test(value)) return null;
+  if (scope === "identity" && !/^[^\s@]+(?:@[^\s@]+\.[^\s@]+)?$/.test(value)) return null;
   if (scope === "keyword" && value.length < 3) return null;
-  return `${scope}:${value}`;
+  return value;
 }
 
 function parseAllowlistEntry(entry: string): { scope: AllowlistScope | "value"; value: string } {
   const separator = entry.indexOf(":");
   const scope = entry.slice(0, separator) as AllowlistScope;
-  if (separator > 0 && ["ip", "domain", "hash", "keyword"].includes(scope)) {
+  if (separator > 0 && ["ip", "domain", "hash", "identity", "keyword"].includes(scope)) {
     return { scope, value: entry.slice(separator + 1) };
   }
   return { scope: "value", value: entry };
@@ -1338,6 +1903,8 @@ function allowlistPlaceholder(scope: AllowlistScope): string {
   if (scope === "ip") return "198.51.100.25 or 198.51.100.0/24";
   if (scope === "domain") return "trusted.example";
   if (scope === "hash") return "MD5, SHA-1, or SHA-256";
+  if (scope === "identity") return "svc-backup or analyst@example.com";
+  if (scope === "value") return "Exact normalized value";
   return "approved scanner name";
 }
 
@@ -1613,6 +2180,7 @@ function ThreatRadar({
   const outboundSuspects = sortRadarSuspects(result?.suspiciousOutbound ?? [], outboundSort);
   const deniedSuspects = sortRadarSuspects(result?.deniedActivity ?? [], deniedSort);
   const reviewCandidates = sortRadarSuspects(result?.reviewCandidates ?? [], reviewSort);
+  const identityAnomalies = normalizeIdentityAnomalies(result?.identityAnomalies);
   const portSuspects = sortRadarSuspects(
     (result?.externalSources ?? []).filter((suspect) => suspect.dangerousPorts.length > 0),
     portSort
@@ -1830,6 +2398,21 @@ function ThreatRadar({
       className: `panel radar-widget ${floating ? "dragging floating" : ""}`
     };
 
+    if (item.id === "identity") {
+      return (
+        <div key={item.id} data-radar-card={item.id} style={style} {...cardProps}>
+          {editHandles}
+          <div className="ranked-card-head">
+            <div>
+              <h3>Authentication Attack Evidence</h3>
+              <span>Only credential-attack patterns corroborated by failures, source spread, or learned baseline changes</span>
+            </div>
+          </div>
+          <IdentityAnomalyList anomalies={identityAnomalies} />
+        </div>
+      );
+    }
+
     if (item.id === "sources") {
       return (
         <div key={item.id} data-radar-card={item.id} style={style} {...cardProps}>
@@ -1867,7 +2450,7 @@ function ThreatRadar({
           <div className="ranked-card-head">
             <div>
               <h3>Suspicious Outbound Activity</h3>
-              <span>Internal sources communicating with public destinations</span>
+              <span>Exact private-to-public flows with adverse reputation or corroborated threat evidence</span>
             </div>
           </div>
           <ThreatRadarList suspects={outboundSuspects} mode="outbound" sort={outboundSort} onSort={setOutboundSort} />
@@ -1953,7 +2536,7 @@ function ThreatRadar({
             : <>Scanning <strong>{agentConfig.indexPattern}</strong> every {agentConfig.intervalMinutes} minutes across threat signals, denied activity, risky authentication, exposed services, and traffic behavior. Public inbound threats require corroborated evidence; private hosts are evaluated only for suspicious outbound communication. Findings remain visible in a rolling 24-hour history.</>}</p>
           <p className="radar-run-summary">
             {result
-              ? `${result.eventsAnalyzed.toLocaleString()} events analyzed | ${(result.analysis?.candidatesEvaluated ?? result.summary.suspects).toLocaleString()} evidence candidates evaluated | ${result.summary.suspects.toLocaleString()} promoted findings | ${(result.analysis?.candidatesForReview ?? result.reviewCandidates?.length ?? 0).toLocaleString()} queued for review | ${result.signals.length.toLocaleString()} active signal families`
+              ? formatRadarCandidateSummary(result)
               : "No completed analysis is available yet."}
           </p>
         </div>
@@ -2000,11 +2583,13 @@ function ThreatRadar({
         <div className="notice wide radar-coverage-warning" role="status">
           <AlertTriangle size={18} aria-hidden="true" />
           <div>
-            <strong>Reputation coverage is {result.analysis.reputation.status === "not_configured" ? "not configured" : "still in progress"}</strong>
+            <strong>{formatReputationCoverageTitle(result.analysis.reputation)}</strong>
             <span>{formatReputationCoverage(result.analysis.reputation)}</span>
           </div>
         </div>
       ) : null}
+
+      <ThreatRadarOperationalOverview result={result} scanHistory={agentState.scanHistory ?? []} />
 
       <DetectionSignalDashboard result={result} />
 
@@ -2044,6 +2629,98 @@ function ThreatRadarRangePicker({ value, onChange }: { value: RadarTimeRange; on
   );
 }
 
+function ThreatRadarOperationalOverview({ result, scanHistory }: { result: ThreatRadarResponse | null; scanHistory: ThreatRadarScanRun[] }) {
+  const [view, setView] = useState<"health" | "trends" | "coverage">("health");
+  const health = result?.analysis?.dataHealth;
+  const coverage = result?.analysis?.detectionCoverage ?? [];
+  const trackedFindings = [
+    ...(result?.suspects ?? []),
+    ...(result?.reviewCandidates ?? [])
+  ];
+  const uniqueFindings = [...new Map(trackedFindings.map((finding) => [`${finding.role}|${finding.direction}|${finding.sourceIp}|${finding.destinationIp}`, finding])).values()];
+  const newFindings = uniqueFindings.filter((finding) => finding.active !== false && (finding.observations ?? 1) <= 1).length;
+  const increasing = uniqueFindings.filter((finding) => finding.active !== false && (finding.eventDelta ?? 0) > 0).length;
+  const decreasing = uniqueFindings.filter((finding) => finding.active !== false && (finding.eventDelta ?? 0) < 0).length;
+  const resolved = uniqueFindings.filter((finding) => finding.active === false).length;
+  const latestRun = scanHistory[0];
+
+  return (
+    <section className="panel wide radar-operational-overview" aria-labelledby="radar-overview-title">
+      <div className="panel-title-row">
+        <div>
+          <h2 id="radar-overview-title">Analysis Assurance</h2>
+          <p className="muted">Coverage, trend context, and versioned detection logic for the result currently on screen.</p>
+        </div>
+        <div className="settings-tabs compact-tabs" role="tablist" aria-label="Analysis assurance views">
+          {(["health", "trends", "coverage"] as const).map((item) => (
+            <button key={item} type="button" role="tab" aria-selected={view === item} className={view === item ? "active" : ""} onClick={() => setView(item)}>{item === "health" ? "Data Health" : item === "trends" ? "Trends" : "Detection Coverage"}</button>
+          ))}
+        </div>
+      </div>
+
+      {view === "health" ? (
+        health ? <div className="data-health-content">
+          <div className="data-health-summary">
+            <Badge value={health.status} />
+            <span><strong>{health.events.toLocaleString()}</strong> {health.exactEventCount ? "events" : "events or more"}</span>
+            <span className="mono-cell">{health.indexPattern}</span>
+            <span>{health.from} to {health.to}</span>
+            <span>{health.tookMs !== undefined ? `${health.tookMs.toLocaleString()} ms` : "Latency unavailable"}</span>
+            {latestRun ? <span>Run {latestRun.id.slice(0, 8)} | {latestRun.status}</span> : null}
+          </div>
+          {health.message ? <div className="field-error">{health.message}</div> : null}
+          <div className="field-coverage-grid">
+            {health.fields.map((field) => (
+              <div className="field-coverage-row" key={field.key}>
+                <div><span>{field.label}</span><strong>{field.coverage.toFixed(1)}%</strong></div>
+                <div className="coverage-bar" role="progressbar" aria-label={`${field.label} coverage`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={field.coverage}><i style={{ width: `${Math.min(100, field.coverage)}%` }} /></div>
+              </div>
+            ))}
+          </div>
+          {health.skippedStages.length ? <p className="muted">Skipped stages: {health.skippedStages.join(", ")}</p> : <p className="muted">All configured analysis stages completed.</p>}
+        </div> : <div className="empty-card"><strong>Data-health telemetry is not available yet.</strong><span>Run Threat Radar after reloading the updated extension.</span></div>
+      ) : null}
+
+      {view === "trends" ? (
+        <div className="trend-overview">
+          <StatusTile label="New" value={String(newFindings)} tone={newFindings ? "critical" : "unknown"} />
+          <StatusTile label="Increasing" value={String(increasing)} tone={increasing ? "critical" : "unknown"} />
+          <StatusTile label="Decreasing" value={String(decreasing)} tone={decreasing ? "healthy" : "unknown"} />
+          <StatusTile label="Quiet / Resolved" value={String(resolved)} tone={resolved ? "healthy" : "unknown"} />
+          <div className="trend-routes">
+            <strong>Highest-change relationships</strong>
+            {uniqueFindings
+              .filter((finding) => finding.eventDelta !== undefined)
+              .sort((left, right) => Math.abs(right.eventDelta ?? 0) - Math.abs(left.eventDelta ?? 0))
+              .slice(0, 5)
+              .map((finding) => <span key={`${finding.role}|${finding.direction}|${finding.sourceIp}|${finding.destinationIp}`}><span className="mono-cell">{finding.sourceIp} to {finding.destinationIp}</span><strong>{formatEventDelta(finding.eventDelta)}</strong></span>)}
+            {!uniqueFindings.some((finding) => finding.eventDelta !== undefined) ? <span>Trend deltas appear after the same relationship is observed in another scheduled scan.</span> : null}
+          </div>
+        </div>
+      ) : null}
+
+      {view === "coverage" ? (
+        coverage.length ? <div className="detection-coverage-grid">
+          {coverage.map((pack) => (
+            <article key={pack.id} className="detection-coverage-row">
+              <div><strong>{pack.label}</strong><span>{pack.description}</span></div>
+              <div className="coverage-tags">{pack.techniques.map((technique) => <span key={technique}>{technique}</span>)}</div>
+              <span>{pack.evidenceFields.join(", ")}</span>
+              <Badge value={pack.status === "active" ? `${pack.activeCount} active` : "Watching"} />
+            </article>
+          ))}
+          <p className="muted detection-pack-version">Detection pack v{result?.analysis?.detectionPackVersion ?? "--"}. ATT&amp;CK technique IDs describe coverage intent; they are not proof of compromise.</p>
+        </div> : <div className="empty-card"><strong>No detection-pack metadata is attached to this result.</strong><span>Run a new analysis after rebuilding and reloading the extension.</span></div>
+      ) : null}
+    </section>
+  );
+}
+
+function formatEventDelta(value: number | undefined): string {
+  if (value === undefined) return "--";
+  return value > 0 ? `+${value.toLocaleString()}` : value.toLocaleString();
+}
+
 function RadarResizeHandles({ onResize }: { onResize: (event: React.PointerEvent, edge: string) => void }) {
   const handles = ["n", "e", "s", "w", "ne", "se", "sw", "nw"];
   return (
@@ -2057,6 +2734,91 @@ function RadarResizeHandles({ onResize }: { onResize: (event: React.PointerEvent
         />
       ))}
     </>
+  );
+}
+
+function IdentityAnomalyList({ anomalies }: { anomalies: IdentityAnomalyRow[] }) {
+  const pageSize = 10;
+  const [sort, setSort] = useState<IdentitySort>({ field: "score", direction: "desc" });
+  const [page, setPage] = useState(1);
+  const sortedAnomalies = useMemo(() => sortIdentityAnomalies(anomalies, sort), [anomalies, sort]);
+  const pageCount = Math.max(1, Math.ceil(sortedAnomalies.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
+  const pageStart = (currentPage - 1) * pageSize;
+  const visibleAnomalies = sortedAnomalies.slice(pageStart, pageStart + pageSize);
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, pageCount));
+  }, [pageCount]);
+
+  if (anomalies.length === 0) {
+    return <EmptyRadarState title="No credential-attack pattern met the corroboration threshold." />;
+  }
+
+  return (
+    <div className="radar-list">
+      <div className="mini-table-wrap radar-table-wrap">
+        <table className="mini-ioc-table identity-anomaly-table">
+          <thead>
+            <tr>
+              <SortableRadarHeader label="Account / Email" field="account" sort={sort} onSort={setSort} />
+              <SortableRadarHeader label="Source IP" field="sourceIp" sort={sort} onSort={setSort} />
+              <SortableRadarHeader label="Destination / Service" field="destination" sort={sort} onSort={setSort} />
+              <SortableRadarHeader label="Events" field="events" sort={sort} onSort={setSort} />
+              <SortableRadarHeader label="Failures" field="failures" sort={sort} onSort={setSort} />
+              <SortableRadarHeader label="Successes" field="successes" sort={sort} onSort={setSort} />
+              <SortableRadarHeader label="Infrastructure" field="infrastructure" sort={sort} onSort={setSort} />
+              <SortableRadarHeader label="First Seen" field="firstSeen" sort={sort} onSort={setSort} />
+              <SortableRadarHeader label="Last Seen" field="lastSeen" sort={sort} onSort={setSort} />
+              <SortableRadarHeader label="Score" field="score" sort={sort} onSort={setSort} />
+              <SortableRadarHeader label="Evidence" field="evidence" sort={sort} onSort={setSort} />
+            </tr>
+          </thead>
+          <tbody>
+            {visibleAnomalies.map((anomaly) => (
+              <IdentityAnomalyTableRow key={anomaly.id} anomaly={anomaly} />
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <RadarPagination
+        page={currentPage}
+        pageCount={pageCount}
+        total={sortedAnomalies.length}
+        pageSize={pageSize}
+        onChange={setPage}
+        ariaLabel="Authentication attack evidence pages"
+      />
+    </div>
+  );
+}
+
+function IdentityAnomalyTableRow({ anomaly }: { anomaly: IdentityAnomalyRow }) {
+  return (
+    <tr>
+      <td>
+        <div className="identity-stacked-cell">
+          <strong>{anomaly.account}</strong>
+          {anomaly.email !== "--" && anomaly.email !== anomaly.account ? <span>{anomaly.email}</span> : null}
+          <span className={`identity-status ${anomaly.promoted ? "promoted" : "review"}`}>{anomaly.promoted ? "Promoted finding" : "Investigation signal"}</span>
+        </div>
+      </td>
+      <td className="mono-cell">{anomaly.sourceIp}</td>
+      <td>
+        <div className="identity-stacked-cell">
+          <strong>{anomaly.destination}</strong>
+          {anomaly.service !== "--" && anomaly.service !== anomaly.destination ? <span>{anomaly.service}</span> : null}
+        </div>
+      </td>
+      <td>{anomaly.events.toLocaleString()}</td>
+      <td>{anomaly.failures.toLocaleString()}</td>
+      <td>{anomaly.successes.toLocaleString()}</td>
+      <td>{anomaly.infrastructureCount.toLocaleString()}</td>
+      <td className="identity-time-cell">{formatIdentityTimestamp(anomaly.firstSeen)}</td>
+      <td className="identity-time-cell">{formatIdentityTimestamp(anomaly.lastSeen)}</td>
+      <td><Badge value={String(anomaly.score)} /></td>
+      <td className="identity-evidence-cell" title={anomaly.evidence.join(" | ")}>{anomaly.evidence.slice(0, 3).join(" | ") || "--"}</td>
+    </tr>
   );
 }
 
@@ -2105,7 +2867,8 @@ function ThreatRadarList({
               <SortableRadarHeader label="Reputation" field="gti" sort={sort} onSort={onSort} />
               <SortableRadarHeader label="Events" field="events" sort={sort} onSort={onSort} />
               <SortableRadarHeader label="Denied" field="denied" sort={sort} onSort={onSort} />
-              <SortableRadarHeader label="Outbound" field="outbound" sort={sort} onSort={onSort} />
+              <SortableRadarHeader label="Egress events" field="outbound" sort={sort} onSort={onSort} />
+              {mode === "outbound" ? <SortableRadarHeader label="Egress bytes" field="bytes" sort={sort} onSort={onSort} /> : null}
               <SortableRadarHeader label="Infrastructure" field="infrastructure" sort={sort} onSort={onSort} />
               <SortableRadarHeader label="Ports" field="ports" sort={sort} onSort={onSort} />
               <SortableRadarHeader label="History" field="history" sort={sort} onSort={onSort} />
@@ -2122,6 +2885,7 @@ function ThreatRadarList({
                 <td>{suspect.events}</td>
                 <td>{suspect.deniedEvents ?? 0}</td>
                 <td>{suspect.outboundEvents ?? 0}</td>
+                {mode === "outbound" ? <td>{formatByteCount(suspect.outboundBytes)}</td> : null}
                 <td>{suspect.infrastructureCount}</td>
                 <td>{suspect.topPorts.length ? suspect.topPorts.join(", ") : "--"}</td>
                 <td><FindingHistoryCell suspect={suspect} /></td>
@@ -2136,16 +2900,16 @@ function ThreatRadarList({
   );
 }
 
-function SortableRadarHeader({
+function SortableRadarHeader<Field extends string>({
   label,
   field,
   sort,
   onSort
 }: {
   label: string;
-  field: RadarSortField;
-  sort: RadarSort;
-  onSort: (sort: RadarSort) => void;
+  field: Field;
+  sort: { field: Field; direction: RadarSortDirection };
+  onSort: (sort: { field: Field; direction: RadarSortDirection }) => void;
 }) {
   const active = sort.field === field;
   const Icon = active ? sort.direction === "asc" ? ArrowUp : ArrowDown : ArrowUpDown;
@@ -2238,10 +3002,12 @@ type ThreatSignalDetail = {
   actions: Array<{ key: string; count: number }>;
   infrastructureCount: number;
   ports: number[];
+  outboundBytes: number;
   score: number;
   gti: ThreatRadarSuspect["gti"] | undefined;
   gtiTarget: string;
   evidence: string[];
+  identity?: IdentityAnomalyRow;
 };
 
 function DetectionSignalDashboard({ result }: { result: ThreatRadarResponse | null }) {
@@ -2259,6 +3025,7 @@ function DetectionSignalDashboard({ result }: { result: ThreatRadarResponse | nu
   const pageCount = Math.max(1, Math.ceil(details.length / pageSize));
   const currentPage = Math.min(page, pageCount);
   const visibleDetails = details.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const isIdentitySignal = selectedKey === IDENTITY_AUTH_SIGNAL_KEY;
 
   useEffect(() => {
     setPage(1);
@@ -2363,36 +3130,63 @@ function DetectionSignalDashboard({ result }: { result: ThreatRadarResponse | nu
             <div className="signal-modal-body">
               {details.length === 0 ? <EmptyRadarState title="No retained entities are available for this signal." /> : (
                 <div className="mini-table-wrap signal-detail-table-wrap">
-                  <table className="mini-ioc-table signal-detail-table">
-                    <thead>
-                      <tr>
-                        <th>Source IP</th>
-                        <th>Destination IP</th>
-                        <th>Logs</th>
-                        <th>Event actions</th>
-                        <th>Infrastructure</th>
-                        <th>Destination ports</th>
-                        <th>Score</th>
-                        <th>GTI / VT</th>
-                        <th>Evidence</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {visibleDetails.map((detail) => (
-                        <tr key={detail.id}>
-                          <td className="mono-cell">{detail.sourceIp}</td>
-                          <td className="mono-cell">{detail.destinationIp}</td>
-                          <td>{detail.events.toLocaleString()}</td>
-                          <td>{formatSignalActions(detail.actions)}</td>
-                          <td>{detail.infrastructureCount.toLocaleString()}</td>
-                          <td>{detail.ports.length ? detail.ports.join(", ") : "--"}</td>
-                          <td><Badge value={String(detail.score)} /></td>
-                          <td>{formatGti(detail.gti, detail.gtiTarget)}</td>
-                          <td>{detail.evidence.slice(0, 3).join(" | ") || "--"}</td>
+                  {isIdentitySignal ? (
+                    <table className="mini-ioc-table signal-detail-table identity-signal-detail-table">
+                      <thead>
+                        <tr>
+                          <th>Account / Email</th>
+                          <th>Source IP</th>
+                          <th>Destination / Service</th>
+                          <th>Events</th>
+                          <th>Failures</th>
+                          <th>Successes</th>
+                          <th>Infrastructure</th>
+                          <th>First Seen</th>
+                          <th>Last Seen</th>
+                          <th>Score</th>
+                          <th>Evidence</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {visibleDetails.map((detail) => detail.identity ? (
+                          <IdentityAnomalyTableRow key={detail.id} anomaly={detail.identity} />
+                        ) : null)}
+                      </tbody>
+                    </table>
+                  ) : (
+                    <table className="mini-ioc-table signal-detail-table">
+                      <thead>
+                        <tr>
+                          <th>Source IP</th>
+                          <th>Destination IP</th>
+                          <th>Logs</th>
+                          <th>Event actions</th>
+                          <th>Infrastructure</th>
+                          <th>Destination ports</th>
+                          <th>Egress bytes</th>
+                          <th>Score</th>
+                          <th>GTI / VT</th>
+                          <th>Evidence</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {visibleDetails.map((detail) => (
+                          <tr key={detail.id}>
+                            <td className="mono-cell">{detail.sourceIp}</td>
+                            <td className="mono-cell">{detail.destinationIp}</td>
+                            <td>{detail.events.toLocaleString()}</td>
+                            <td>{formatSignalActions(detail.actions)}</td>
+                            <td>{detail.infrastructureCount.toLocaleString()}</td>
+                            <td>{detail.ports.length ? detail.ports.join(", ") : "--"}</td>
+                            <td>{formatByteCount(detail.outboundBytes)}</td>
+                            <td><Badge value={String(detail.score)} /></td>
+                            <td>{formatGti(detail.gti, detail.gtiTarget)}</td>
+                            <td>{detail.evidence.slice(0, 3).join(" | ") || "--"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
                 </div>
               )}
             </div>
@@ -2416,6 +3210,7 @@ function DetectionSignalDashboard({ result }: { result: ThreatRadarResponse | nu
 function buildDetectionSignalSummaries(result: ThreatRadarResponse | null): Array<{ key: string; label: string; count: number }> {
   if (!result) return [];
   const labels = new Map(result.signals.map((signal) => [signal.key, signal.label]));
+  if (normalizeIdentityAnomalies(result.identityAnomalies).length > 0) labels.set(IDENTITY_AUTH_SIGNAL_KEY, labels.get(IDENTITY_AUTH_SIGNAL_KEY) ?? "Authentication attack evidence");
   if (result.suspects.some((finding) => isPublicInboundSource(finding) && finding.deniedEvents > 0)) labels.set("denied", labels.get("denied") ?? "Denied activity");
   if (result.suspects.some((finding) => finding.direction === "outbound")) labels.set("outbound", labels.get("outbound") ?? "Suspicious outbound");
   if (result.suspects.some((finding) => isPublicInboundSource(finding) && finding.dangerousPorts.length > 0)) labels.set("dangerous_ports", labels.get("dangerous_ports") ?? "Risky ports");
@@ -2430,11 +3225,30 @@ function buildDetectionSignalSummaries(result: ThreatRadarResponse | null): Arra
 }
 
 function getThreatSignalDetails(result: ThreatRadarResponse, signalKey: string): ThreatSignalDetail[] {
+  if (signalKey === IDENTITY_AUTH_SIGNAL_KEY) {
+    return normalizeIdentityAnomalies(result.identityAnomalies)
+      .map((identity) => ({
+        id: `identity:${identity.id}`,
+        entity: identity.account,
+        sourceIp: identity.sourceIp,
+        destinationIp: identity.destination,
+        events: identity.events,
+        actions: [],
+        infrastructureCount: identity.infrastructureCount,
+        ports: [],
+        outboundBytes: 0,
+        score: identity.score,
+        gti: undefined,
+        gtiTarget: "",
+        evidence: identity.evidence,
+        identity
+      }));
+  }
   const details: ThreatSignalDetail[] = [];
   if (signalKey !== "indicators") {
     for (const finding of result.suspects.filter((item) => findingMatchesSignal(item, signalKey))) {
       details.push({
-        id: `ip:${finding.role}:${finding.direction}:${finding.ip}`,
+        id: `ip:${finding.role}:${finding.direction}:${finding.sourceIp}:${finding.destinationIp}`,
         entity: finding.ip,
         sourceIp: finding.sourceIp,
         destinationIp: finding.destinationIp,
@@ -2442,6 +3256,7 @@ function getThreatSignalDetails(result: ThreatRadarResponse, signalKey: string):
         actions: finding.actions,
         infrastructureCount: finding.infrastructureCount,
         ports: finding.topPorts,
+        outboundBytes: finding.outboundBytes ?? 0,
         score: finding.score,
         gti: finding.gti,
         gtiTarget: finding.gtiIp,
@@ -2460,6 +3275,7 @@ function getThreatSignalDetails(result: ThreatRadarResponse, signalKey: string):
         actions: indicator.actions,
         infrastructureCount: indicator.infrastructureCount,
         ports: indicator.latest?.destinationPort ? [indicator.latest.destinationPort] : [],
+        outboundBytes: 0,
         score: indicator.score,
         gti: indicator.gti,
         gtiTarget: indicator.value,
@@ -2764,6 +3580,144 @@ function IntelPivots({ ioc }: { ioc: HuntedIOC | undefined }) {
   );
 }
 
+function CasesPanel() {
+  const [cases, setCases] = useState<ThreatCase[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [title, setTitle] = useState("");
+  const [summary, setSummary] = useState("");
+  const [severity, setSeverity] = useState<ThreatCase["severity"]>("medium");
+  const [assignee, setAssignee] = useState("");
+  const [note, setNote] = useState("");
+  const [noteAuthor, setNoteAuthor] = useState("");
+  const [caseError, setCaseError] = useState<string | null>(null);
+  const [loadingCases, setLoadingCases] = useState(false);
+  const selected = cases.find((item) => item.id === selectedId) ?? cases[0];
+
+  useEffect(() => {
+    void loadCases();
+  }, []);
+
+  useEffect(() => {
+    setAssignee(selected?.assignee ?? "");
+  }, [selected?.id, selected?.assignee]);
+
+  async function loadCases() {
+    setLoadingCases(true);
+    const response = await sendBridgeMessage<unknown, { cases: ThreatCase[] }>("cases.list", {});
+    if (response.success) {
+      setCases(response.data.cases);
+      setSelectedId((current) => current ?? response.data.cases[0]?.id ?? null);
+      setCaseError(null);
+    } else {
+      setCaseError(response.error.message);
+    }
+    setLoadingCases(false);
+  }
+
+  async function createCase(event: React.FormEvent) {
+    event.preventDefault();
+    setLoadingCases(true);
+    const response = await sendBridgeMessage<unknown, { case: ThreatCase; cases: ThreatCase[] }>("cases.create", { title, summary, severity });
+    if (response.success) {
+      setCases(response.data.cases);
+      setSelectedId(response.data.case.id);
+      setTitle("");
+      setSummary("");
+      setCaseError(null);
+    } else setCaseError(response.error.message);
+    setLoadingCases(false);
+  }
+
+  async function updateCase(changes: Partial<Pick<ThreatCase, "title" | "summary" | "severity" | "status" | "assignee" | "resolution" | "tags">>) {
+    if (!selected) return;
+    setLoadingCases(true);
+    const response = await sendBridgeMessage<unknown, { case: ThreatCase; cases: ThreatCase[] }>("cases.update", { id: selected.id, ...changes });
+    if (response.success) {
+      setCases(response.data.cases);
+      setCaseError(null);
+    } else setCaseError(response.error.message);
+    setLoadingCases(false);
+  }
+
+  async function addCaseNote(event: React.FormEvent) {
+    event.preventDefault();
+    if (!selected || !note.trim()) return;
+    setLoadingCases(true);
+    const response = await sendBridgeMessage<unknown, { case: ThreatCase; cases: ThreatCase[] }>("cases.note", { id: selected.id, body: note, author: noteAuthor });
+    if (response.success) {
+      setCases(response.data.cases);
+      setNote("");
+      setCaseError(null);
+    } else setCaseError(response.error.message);
+    setLoadingCases(false);
+  }
+
+  function exportCase(item: ThreatCase) {
+    const blob = new Blob([JSON.stringify(item, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `soc-watch-case-${item.id}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
+  const openCount = cases.filter((item) => item.status !== "resolved" && item.status !== "closed").length;
+  const criticalCount = cases.filter((item) => item.severity === "critical" && item.status !== "closed").length;
+  return (
+    <section className="grid cases-view">
+      <div className="status-strip wide">
+        <StatusTile label="Cases" value={String(cases.length)} tone={cases.length ? "healthy" : "unknown"} />
+        <StatusTile label="Open" value={String(openCount)} tone={openCount ? "critical" : "unknown"} />
+        <StatusTile label="Critical" value={String(criticalCount)} tone={criticalCount ? "critical" : "unknown"} />
+        <StatusTile label="Storage" value="Local profile" tone="unknown" />
+      </div>
+      {caseError ? <div className="notice wide" role="alert"><AlertTriangle size={18} aria-hidden="true" /><div><strong>Case operation failed</strong><span>{caseError}</span></div></div> : null}
+
+      <div className="panel case-list-panel">
+        <div className="panel-title-row">
+          <div><h2>Investigation Cases</h2><p className="muted">Evidence snapshots and analyst notes stored in this extension profile.</p></div>
+          <button className="icon-button" type="button" aria-label="Refresh cases" onClick={() => void loadCases()} disabled={loadingCases}><RefreshCw size={18} className={loadingCases ? "spin" : ""} aria-hidden="true" /></button>
+        </div>
+        <form className="case-create-form" onSubmit={createCase}>
+          <label className="field"><span>Case title</span><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Investigate unusual SSH access" required maxLength={200} /></label>
+          <label className="field"><span>Severity</span><select value={severity} onChange={(event) => setSeverity(event.target.value as ThreatCase["severity"])}><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
+          <label className="field"><span>Summary</span><textarea value={summary} onChange={(event) => setSummary(event.target.value)} placeholder="What should the analyst verify?" rows={3} /></label>
+          <button className="primary" type="submit" disabled={loadingCases || !title.trim()}><BriefcaseBusiness size={17} aria-hidden="true" /><span>Create Case</span></button>
+        </form>
+        {cases.length ? <div className="case-list" role="list">{cases.map((item) => (
+          <button key={item.id} type="button" role="listitem" className={selected?.id === item.id ? "selected" : ""} onClick={() => setSelectedId(item.id)}>
+            <span><strong>{item.title}</strong><small>{new Date(item.updatedAt).toLocaleString()}</small></span>
+            <span><Badge value={item.severity} /><Badge value={item.status.replace("_", " ")} /></span>
+          </button>
+        ))}</div> : <div className="empty-card"><strong>No investigation cases yet.</strong><span>Create one here or promote an alert from Alert History.</span></div>}
+      </div>
+
+      <div className="panel case-detail-panel">
+        {selected ? <>
+          <div className="panel-title-row">
+            <div><span className="eyebrow">Case {selected.id.slice(0, 8)}</span><h2>{selected.title}</h2><p className="muted">Created {new Date(selected.createdAt).toLocaleString()} | Updated {new Date(selected.updatedAt).toLocaleString()}</p></div>
+            <button className="secondary" type="button" onClick={() => exportCase(selected)}><Download size={17} aria-hidden="true" /><span>Export JSON</span></button>
+          </div>
+          <div className="case-controls">
+            <label className="field"><span>Status</span><select value={selected.status} onChange={(event) => void updateCase({ status: event.target.value as ThreatCaseStatus })}><option value="open">Open</option><option value="acknowledged">Acknowledged</option><option value="in_progress">In progress</option><option value="resolved">Resolved</option><option value="closed">Closed</option></select></label>
+            <label className="field"><span>Assignee</span><input value={assignee} onChange={(event) => setAssignee(event.target.value)} onBlur={() => void updateCase({ assignee })} placeholder="Analyst name" /></label>
+            <label className="field"><span>Severity</span><select value={selected.severity} onChange={(event) => void updateCase({ severity: event.target.value as ThreatCase["severity"] })}><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
+          </div>
+          <div className="case-summary"><h3>Summary</h3><p>{selected.summary || "No summary recorded."}</p></div>
+          <div className="case-evidence"><h3>Evidence Snapshot</h3>{selected.evidence.length ? <dl>{selected.evidence.map((entry, index) => <React.Fragment key={`${entry.label}-${index}`}><dt>{entry.label}</dt><dd>{entry.value}</dd></React.Fragment>)}</dl> : <p className="muted">This manually created case has no alert snapshot yet.</p>}</div>
+          <form className="case-note-form" onSubmit={addCaseNote}>
+            <h3>Analyst Notes</h3>
+            <div><label className="field"><span>Author</span><input value={noteAuthor} onChange={(event) => setNoteAuthor(event.target.value)} placeholder="Analyst" /></label><label className="field"><span>Note</span><textarea value={note} onChange={(event) => setNote(event.target.value)} rows={3} placeholder="Record investigation facts and decisions" required /></label></div>
+            <button className="secondary" type="submit" disabled={loadingCases || !note.trim()}><MessageSquare size={17} aria-hidden="true" /><span>Add Note</span></button>
+          </form>
+          <div className="case-notes">{selected.notes.map((entry) => <article key={entry.id}><div><strong>{entry.author ?? "Analyst"}</strong><span>{new Date(entry.createdAt).toLocaleString()}</span></div><p>{entry.body}</p></article>)}</div>
+        </> : <div className="empty-card"><strong>Select or create a case.</strong><span>Case evidence is kept independently from the changing dashboard.</span></div>}
+      </div>
+    </section>
+  );
+}
+
 function AlertsPanel() {
   const [dashboard, setDashboard] = useState<AlertDashboardResponse | null>(null);
   const [loadingAlerts, setLoadingAlerts] = useState(true);
@@ -2779,6 +3733,7 @@ function AlertsPanel() {
   const [telegramBotToken, setTelegramBotToken] = useState("");
   const [telegramChatId, setTelegramChatId] = useState("");
   const [historyPage, setHistoryPage] = useState(1);
+  const [feedbackChoices, setFeedbackChoices] = useState<Record<string, ThreatFeedbackDisposition>>({});
 
   const historyPageSize = 10;
   const historyPageCount = Math.max(1, Math.ceil((dashboard?.history.length ?? 0) / historyPageSize));
@@ -2878,10 +3833,79 @@ function AlertsPanel() {
     setLoadingAlerts(false);
   }
 
+  async function testDelivery() {
+    setLoadingAlerts(true);
+    setAlertError(null);
+    setSavedMessage(null);
+    const response = await sendBridgeMessage<unknown, { delivery: AlertDelivery }>("alerts.test", {});
+    if (response.success) {
+      const sent = (["browser", "discord", "telegram"] as const).filter((channel) => response.data.delivery[channel] === "sent");
+      setSavedMessage(sent.length ? `Test alert delivered through ${sent.join(", ")}.` : "Test completed, but no channel accepted the alert. Review the delivery diagnostics below.");
+      if (response.data.delivery.errors.length) setAlertError(response.data.delivery.errors.join(" | "));
+      await loadAlerts(false);
+    } else setAlertError(response.error.message);
+    setLoadingAlerts(false);
+  }
+
+  async function saveFeedback(item: AlertHistoryItem) {
+    const disposition = feedbackChoices[item.id] ?? "needs_review";
+    const suppressesNotifications = ["benign", "expected_scanner", "expected_service"].includes(disposition);
+    const expiresAt = suppressesNotifications ? new Date(Date.now() + ANALYST_FEEDBACK_SUPPRESSION_MS).toISOString() : undefined;
+    setLoadingAlerts(true);
+    const response = await sendBridgeMessage<unknown, { feedback: ThreatFeedbackRecord[] }>("threatRadar.feedback.save", {
+      targetKind: "alert",
+      targetFingerprint: item.fingerprint,
+      disposition,
+      reason: `Analyst disposition set from alert ${item.id}`,
+      ...(expiresAt ? { expiresAt } : {})
+    });
+    if (response.success) {
+      setSavedMessage(`Alert marked ${formatDisposition(disposition)}. ${suppressesNotifications ? "Matching notifications are suppressed for seven days; use the structured allowlist for a permanent exception." : "The decision was added to the audit trail."}`);
+      await loadAlerts(false);
+    } else setAlertError(response.error.message);
+    setLoadingAlerts(false);
+  }
+
+  async function createCaseFromAlert(item: AlertHistoryItem) {
+    setLoadingAlerts(true);
+    const response = await sendBridgeMessage<unknown, { case: ThreatCase; cases: ThreatCase[] }>("cases.create", {
+      title: `${item.title}: ${item.indicator}`,
+      severity: item.severity,
+      summary: item.reasons.join(" | "),
+      alertId: item.id,
+      fingerprint: item.fingerprint,
+      tags: [item.category, item.indicatorType],
+      evidence: [
+        { label: "Indicator", value: `${item.indicatorType}: ${item.indicator}` },
+        { label: "Route", value: `${item.sourceIp ?? "--"} to ${item.destinationIp ?? "--"}` },
+        { label: "Score", value: String(item.score) },
+        { label: "Events", value: item.events.toLocaleString() },
+        { label: "Evidence", value: item.reasons.join(" | ") },
+        { label: "Last seen", value: item.lastSeenAt }
+      ]
+    });
+    if (response.success) {
+      setSavedMessage(`Case ${response.data.case.id.slice(0, 8)} is ready in the Cases view.`);
+      await loadAlerts(false);
+    } else setAlertError(response.error.message);
+    setLoadingAlerts(false);
+  }
+
   const channelCount = dashboard
     ? Number(dashboard.config.browserNotifications) + Number(dashboard.config.discordConfigured) + Number(dashboard.config.telegramConfigured)
     : 0;
   const criticalCount = dashboard?.history.filter((item) => item.severity === "critical").length ?? 0;
+  const browserDiagnostic = dashboard?.diagnostics?.browser;
+  const browserStatus = browserDiagnostic?.status ?? "unavailable";
+  const browserStatusLabel = browserStatus === "sent"
+    ? "Last browser alert delivered"
+    : browserStatus === "ready"
+      ? "Browser alerts ready"
+      : browserStatus === "blocked"
+        ? "Browser alerts blocked"
+        : browserStatus === "disabled"
+          ? "Browser alerts disabled"
+          : "Browser alert delivery needs attention";
 
   return (
     <section className="grid alerts-view">
@@ -2898,8 +3922,8 @@ function AlertsPanel() {
       <div className="panel alert-rules-panel">
         <div className="panel-title-row">
           <div>
-            <h2>IOC Alert Rules</h2>
-            <p className="muted">Notify when a promoted Threat Radar finding contains this exact IP, domain, or hash.</p>
+            <h2>IOC and Identity Alert Rules</h2>
+            <p className="muted">Notify when a promoted Threat Radar finding contains this exact IP, domain, hash, or account.</p>
           </div>
           <button className="icon-button" type="button" aria-label="Refresh alert rules" onClick={() => void loadAlerts(true)} disabled={loadingAlerts}>
             <RefreshCw size={18} aria-hidden="true" className={loadingAlerts ? "spin" : ""} />
@@ -2916,11 +3940,12 @@ function AlertsPanel() {
               <option value="ip">IP address</option>
               <option value="domain">Domain</option>
               <option value="hash">File hash</option>
+              <option value="identity">Account or email</option>
             </select>
           </label>
           <label className="field alert-indicator-field">
             <span>Indicator</span>
-            <input value={indicatorValue} onChange={(event) => setIndicatorValue(event.target.value)} placeholder={indicatorType === "ip" ? "203.0.113.10" : indicatorType === "domain" ? "example.com" : "MD5, SHA-1, or SHA-256"} required />
+            <input value={indicatorValue} onChange={(event) => setIndicatorValue(event.target.value)} placeholder={indicatorType === "ip" ? "203.0.113.10" : indicatorType === "domain" ? "example.com" : indicatorType === "hash" ? "MD5, SHA-1, or SHA-256" : "analyst@example.com or svc-backup"} required />
           </label>
           <label className="field">
             <span>Minimum score</span>
@@ -2959,6 +3984,10 @@ function AlertsPanel() {
           <input type="checkbox" checked={browserNotifications} onChange={(event) => setBrowserNotifications(event.target.checked)} />
           <span>Chrome desktop notifications</span>
         </label>
+        <div className={`alert-browser-status ${browserStatus === "ready" || browserStatus === "sent" ? "healthy" : browserStatus === "blocked" || browserStatus === "failed" ? "warning" : "unknown"}`} role="status">
+          <Badge value={browserStatusLabel} />
+          <span>{browserDiagnostic?.lastError ?? (browserDiagnostic?.lastSuccessAt ? `Last delivered ${new Date(browserDiagnostic.lastSuccessAt).toLocaleString()}.` : "The extension checks Chrome permission before every delivery.")}</span>
+        </div>
         <label className="field">
           <span>Alert cooldown</span>
           <select value={cooldownMinutes} onChange={(event) => setCooldownMinutes(Number(event.target.value))}>
@@ -2987,6 +4016,7 @@ function AlertsPanel() {
         </div>
         <div className="alert-delivery-actions">
           <button className="primary" type="button" onClick={() => void saveDelivery()} disabled={loadingAlerts}><ShieldCheck size={17} aria-hidden="true" /><span>Save Delivery</span></button>
+          <button className="secondary" type="button" onClick={() => void testDelivery()} disabled={loadingAlerts}><Bell size={17} aria-hidden="true" /><span>Send Test Alert</span></button>
           {dashboard?.config.discordConfigured ? <button className="secondary" type="button" onClick={() => void saveDelivery({ clearDiscord: true })} disabled={loadingAlerts}>Remove Discord</button> : null}
           {dashboard?.config.telegramConfigured ? <button className="secondary" type="button" onClick={() => void saveDelivery({ clearTelegram: true })} disabled={loadingAlerts}>Remove Telegram</button> : null}
         </div>
@@ -3001,20 +4031,45 @@ function AlertsPanel() {
           <>
             <div className="mini-table-wrap alert-table-wrap">
               <table className="mini-ioc-table alert-history-table">
-                <thead><tr><th>Severity</th><th>Alert</th><th>Indicator / route</th><th>Score</th><th>Events</th><th>Evidence</th><th>Occurrences</th><th>Last seen</th><th>Delivery</th></tr></thead>
-                <tbody>{visibleHistory.map((item) => (
-                  <tr key={item.id}>
-                    <td><Badge value={item.severity} /></td>
-                    <td><strong>{item.title}</strong>{item.ruleNames.length ? <small>{item.ruleNames.join(", ")}</small> : null}</td>
-                    <td className="mono-cell"><strong>{item.indicator}</strong><small>{item.sourceIp || item.destinationIp ? `${item.sourceIp ?? "--"} -> ${item.destinationIp ?? "--"}` : item.indicatorType}</small></td>
-                    <td><Badge value={String(item.score)} /></td>
-                    <td>{item.events.toLocaleString()}</td>
-                    <td>{item.reasons.slice(0, 3).join(" | ") || "--"}</td>
-                    <td>{item.occurrences}</td>
-                    <td>{new Date(item.lastSeenAt).toLocaleString()}</td>
-                    <td><AlertDeliveryCell delivery={item.delivery} /></td>
-                  </tr>
-                ))}</tbody>
+                <thead><tr><th>Severity</th><th>Alert</th><th>Indicator / route</th><th>Score</th><th>Events</th><th>Evidence</th><th>Occurrences</th><th>Last seen</th><th>Delivery</th><th>Disposition</th><th>Case</th></tr></thead>
+                <tbody>{visibleHistory.map((item) => {
+                  const currentFeedback = dashboard?.feedback?.find((entry) => entry.targetFingerprint === item.fingerprint);
+                  const feedbackExpired = currentFeedback?.expiresAt ? Date.parse(currentFeedback.expiresAt) <= Date.now() : false;
+                  const hasCase = dashboard?.cases?.some((entry) => entry.fingerprints.includes(item.fingerprint)) ?? false;
+                  return (
+                    <tr key={item.id}>
+                      <td><Badge value={item.severity} /></td>
+                      <td><strong>{item.title}</strong>{item.ruleNames.length ? <small>{item.ruleNames.join(", ")}</small> : null}</td>
+                      <td className="mono-cell"><strong>{item.indicator}</strong><small>{item.sourceIp || item.destinationIp ? `${item.sourceIp ?? "--"} -> ${item.destinationIp ?? "--"}` : item.indicatorType}</small></td>
+                      <td><Badge value={String(item.score)} /></td>
+                      <td>{item.events.toLocaleString()}</td>
+                      <td>{item.reasons.slice(0, 3).join(" | ") || "--"}</td>
+                      <td>{item.occurrences}</td>
+                      <td>{new Date(item.lastSeenAt).toLocaleString()}</td>
+                      <td><AlertDeliveryCell delivery={item.delivery} /></td>
+                      <td>
+                        <div className="alert-feedback-control">
+                          {currentFeedback ? <span title={currentFeedback.expiresAt ? `Expires ${new Date(currentFeedback.expiresAt).toLocaleString()}` : "Audit decision does not expire"}><Badge value={feedbackExpired ? "Expired" : formatDisposition(currentFeedback.disposition)} /></span> : <span className="muted">Unreviewed</span>}
+                          <div>
+                            <select
+                              aria-label={`Disposition for ${item.indicator}`}
+                              value={feedbackChoices[item.id] ?? currentFeedback?.disposition ?? "needs_review"}
+                              onChange={(event) => setFeedbackChoices((current) => ({ ...current, [item.id]: event.target.value as ThreatFeedbackDisposition }))}
+                            >
+                              <option value="needs_review">Needs review</option>
+                              <option value="confirmed_malicious">Confirmed malicious</option>
+                              <option value="benign">Benign</option>
+                              <option value="expected_scanner">Expected scanner</option>
+                              <option value="expected_service">Expected service</option>
+                            </select>
+                            <button className="icon-button" type="button" aria-label={`Save disposition for ${item.indicator}`} title="Save disposition" onClick={() => void saveFeedback(item)} disabled={loadingAlerts}><CheckCircle2 size={17} aria-hidden="true" /></button>
+                          </div>
+                        </div>
+                      </td>
+                      <td><button className="secondary case-link-button" type="button" onClick={() => void createCaseFromAlert(item)} disabled={loadingAlerts || hasCase}><BriefcaseBusiness size={16} aria-hidden="true" /><span>{hasCase ? "Linked" : "Create"}</span></button></td>
+                    </tr>
+                  );
+                })}</tbody>
               </table>
             </div>
             <RadarPagination page={currentHistoryPage} pageCount={historyPageCount} total={dashboard?.history.length ?? 0} pageSize={historyPageSize} onChange={setHistoryPage} ariaLabel="Alert history pages" />
@@ -3033,6 +4088,70 @@ function AlertDeliveryCell({ delivery }: { delivery: AlertDelivery }) {
       <span>{sent.length ? `Sent: ${sent.join(", ")}` : "In-app only"}</span>
       {failed.length ? <small title={delivery.errors.join(" | ")}>Failed: {failed.join(", ")}</small> : null}
     </div>
+  );
+}
+
+function formatDisposition(disposition: ThreatFeedbackDisposition): string {
+  if (disposition === "confirmed_malicious") return "Confirmed malicious";
+  if (disposition === "expected_scanner") return "Expected scanner";
+  if (disposition === "expected_service") return "Expected service";
+  if (disposition === "needs_review") return "Needs review";
+  return "Benign";
+}
+
+function DiagnosticsPanel({ agentState, indexPattern }: { agentState: ThreatRadarAgentState; indexPattern: string }) {
+  const report = agentState.report;
+  const analysis = report?.analysis;
+  const health = analysis?.dataHealth;
+  const reputation = analysis?.reputation;
+  const scanHistory = agentState.scanHistory ?? [];
+  const latestRun = scanHistory[0];
+  const coverageComplete = Boolean(health && health.status === "healthy" && !analysis?.partial && !health.skippedStages.length);
+
+  return (
+    <section className="grid diagnostics-view">
+      <div className="status-strip wide" aria-label="Threat Radar diagnostic summary">
+        <StatusTile label="Agent" value={agentState.status ?? "unknown"} tone={agentState.status === "healthy" ? "healthy" : agentState.status === "error" ? "critical" : "unknown"} />
+        <StatusTile label="Coverage" value={coverageComplete ? "Complete" : health?.status ?? "Unknown"} tone={coverageComplete ? "healthy" : "unknown"} />
+        <StatusTile label="Reputation" value={reputation?.status ?? "Unknown"} tone={reputation?.status === "healthy" ? "healthy" : "unknown"} />
+        <StatusTile label="Detection Pack" value={analysis?.detectionPackVersion ? `v${analysis.detectionPackVersion}` : "--"} tone={analysis?.detectionPackVersion ? "healthy" : "unknown"} />
+      </div>
+
+      {agentState.lastError ? <div className="notice wide" role="status"><AlertTriangle size={18} aria-hidden="true" /><div><strong>Last agent error</strong><span>{agentState.lastError}</span></div></div> : null}
+
+      <section className="panel diagnostics-health-panel" aria-labelledby="diagnostics-health-title">
+        <div className="panel-title-row"><div><h2 id="diagnostics-health-title">Latest Data Health</h2><p className="muted">What the most recent completed analysis could actually observe.</p></div>{health ? <Badge value={health.status} /> : null}</div>
+        {health ? <>
+          <dl className="diagnostic-facts">
+            <dt>Index</dt><dd className="mono-cell">{health.indexPattern}</dd>
+            <dt>Range</dt><dd>{health.from} to {health.to}</dd>
+            <dt>Events</dt><dd>{health.events.toLocaleString()}{health.exactEventCount ? " exact" : "+ sampled"}</dd>
+            <dt>Query latency</dt><dd>{health.tookMs === undefined ? "Unavailable" : `${health.tookMs.toLocaleString()} ms`}</dd>
+            <dt>Completed stages</dt><dd>{health.completedStages.join(", ") || "None reported"}</dd>
+            <dt>Skipped stages</dt><dd>{health.skippedStages.join(", ") || "None"}</dd>
+          </dl>
+          <div className="field-coverage-grid diagnostic-field-grid">{health.fields.map((field) => <div className="field-coverage-row" key={field.key}><div><span>{field.label}</span><strong>{field.coverage.toFixed(1)}%</strong></div><div className="coverage-bar" role="progressbar" aria-label={`${field.label} coverage`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={field.coverage}><i style={{ width: `${Math.min(100, field.coverage)}%` }} /></div></div>)}</div>
+        </> : <div className="empty-card"><strong>No data-health result is available.</strong><span>Configured index: {indexPattern}. Run a new analysis after rebuilding and reloading the extension.</span></div>}
+      </section>
+
+      <section className="panel diagnostics-service-panel" aria-labelledby="diagnostics-services-title">
+        <div className="panel-title-row"><div><h2 id="diagnostics-services-title">Enrichment and Delivery</h2><p className="muted">Reputation completion and notification outcomes for the latest run.</p></div></div>
+        <dl className="diagnostic-facts">
+          <dt>Reputation</dt><dd>{reputation?.status ?? "Not reported"}</dd>
+          <dt>IP-flow candidates</dt><dd>{analysis?.ipCandidatesEvaluated?.toLocaleString() ?? "--"}</dd>
+          <dt>Domain/hash candidates</dt><dd>{analysis?.indicatorCandidatesEvaluated?.toLocaleString() ?? "--"}</dd>
+          <dt>Authentication-risk candidates</dt><dd>{analysis?.identityCandidatesEvaluated?.toLocaleString() ?? "--"}</dd>
+          <dt>Candidates requested</dt><dd>{reputation?.requested?.toLocaleString() ?? "--"}</dd>
+          <dt>Scored / cached</dt><dd>{reputation ? `${reputation.scored.toLocaleString()} / ${reputation.cached.toLocaleString()}` : "--"}</dd>
+          <dt>Pending / failed</dt><dd>{reputation ? `${reputation.pending.toLocaleString()} / ${reputation.failed.toLocaleString()}` : "--"}</dd>
+          <dt>Notifications</dt><dd>{latestRun ? `${latestRun.notificationsSent} sent / ${latestRun.notificationsFailed} failed` : "No run recorded"}</dd>
+          <dt>Suppressed by feedback</dt><dd>{agentState.suppressedAlerts ?? 0}</dd>
+        </dl>
+        {reputation?.failureReasons?.length ? <div className="diagnostic-failures"><strong>Recent reputation failures</strong>{reputation.failureReasons.map((failure) => <span key={failure.message}>{failure.count}x {failure.message}</span>)}</div> : null}
+      </section>
+
+      <section className="panel wide diagnostics-ledger" aria-label="Threat Radar scan ledger"><ScanHistoryTable runs={scanHistory} /></section>
+    </section>
   );
 }
 
@@ -3107,8 +4226,23 @@ function formatReputationCoverage(coverage: NonNullable<NonNullable<ThreatRadarR
   if (coverage.cached > 0) details.push(`${coverage.cached.toLocaleString()} served from cache`);
   if (coverage.pending > 0) details.push(`${coverage.pending.toLocaleString()} queued`);
   if (coverage.rateLimited > 0) details.push(`${coverage.rateLimited.toLocaleString()} rate limited`);
-  if (coverage.failed > 0) details.push(`${coverage.failed.toLocaleString()} unavailable`);
-  return `${details.join(" | ")}. Pending reputation checks retry automatically on later agent scans.`;
+  if ((coverage.notFound ?? 0) > 0) details.push(`${coverage.notFound!.toLocaleString()} not found in GTI/VT`);
+  if ((coverage.unauthorized ?? 0) > 0) details.push(`${coverage.unauthorized!.toLocaleString()} rejected by the API`);
+  if ((coverage.unavailable ?? 0) > 0) details.push(`${coverage.unavailable!.toLocaleString()} service failure`);
+  if (coverage.failed > 0 && coverage.notFound === undefined) details.push(`${coverage.failed.toLocaleString()} lookup failures`);
+  const retries = coverage.pending > 0 || coverage.rateLimited > 0 || (coverage.unavailable ?? 0) > 0;
+  const failureReason = coverage.failureReasons?.[0];
+  const reasonText = failureReason
+    ? ` Cause: ${failureReason.message}${coverage.failureReasons!.length > 1 ? " Additional provider errors were also returned." : ""}`
+    : "";
+  return `${details.join(" | ")}.${reasonText}${retries ? " Unfinished checks retry automatically on later agent scans." : ""}`;
+}
+
+function formatReputationCoverageTitle(coverage: NonNullable<NonNullable<ThreatRadarResponse["analysis"]>["reputation"]>): string {
+  if (coverage.status === "not_configured") return "Reputation service is not configured";
+  if ((coverage.unauthorized ?? 0) > 0) return "Reputation API key was rejected";
+  if ((coverage.unavailable ?? 0) > 0) return "Reputation service had a lookup failure";
+  return "Reputation checks are still in progress";
 }
 
 function buildIntelPivots(value: string, type: string) {
@@ -3184,11 +4318,37 @@ function formatRadarRangeLabel(range: RadarTimeRange): string {
   return "Today";
 }
 
+function formatRadarCandidateSummary(result: ThreatRadarResponse): string {
+  const analysis = result.analysis;
+  const reviewCount = analysis?.candidatesForReview ?? result.reviewCandidates?.length ?? 0;
+  const parts = [`${result.eventsAnalyzed.toLocaleString()} events analyzed`];
+  if (analysis?.ipCandidatesEvaluated !== undefined) parts.push(`${analysis.ipCandidatesEvaluated.toLocaleString()} IP-flow candidates`);
+  if (analysis?.indicatorCandidatesEvaluated !== undefined) parts.push(`${analysis.indicatorCandidatesEvaluated.toLocaleString()} domain/hash candidates`);
+  if (analysis?.identityCandidatesEvaluated !== undefined) parts.push(`${analysis.identityCandidatesEvaluated.toLocaleString()} authentication-risk candidates`);
+  if (parts.length === 1) parts.push(`${(analysis?.candidatesEvaluated ?? result.summary.suspects).toLocaleString()} evidence candidates evaluated`);
+  parts.push(`${result.summary.suspects.toLocaleString()} promoted findings`);
+  parts.push(`${reviewCount.toLocaleString()} queued for review`);
+  parts.push(`${result.signals.length.toLocaleString()} active signal families`);
+  return parts.join(" | ");
+}
+
+function formatByteCount(value: number | undefined): string {
+  if (!value || value <= 0) return "--";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const index = Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024)));
+  const amount = value / (1024 ** index);
+  return `${amount >= 10 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
+}
+
 function loadPinnedThreatRadarAnalysis(): PinnedThreatRadarAnalysis | null {
   try {
     const parsed = JSON.parse(localStorage.getItem(THREAT_RADAR_PINNED_ANALYSIS_KEY) ?? "null") as Partial<PinnedThreatRadarAnalysis> | null;
     if (!parsed || !["last15m", "last1h", "today"].includes(parsed.range ?? "")) return null;
     if (!parsed.report || typeof parsed.report.analyzedAt !== "string" || !Array.isArray(parsed.report.suspects)) return null;
+    if (parsed.report.analysis?.detectionPackVersion !== CURRENT_DETECTION_PACK_VERSION) {
+      localStorage.removeItem(THREAT_RADAR_PINNED_ANALYSIS_KEY);
+      return null;
+    }
     if (!hasThreatRadarCoreCoverage(parsed.report as ThreatRadarResponse)) {
       localStorage.removeItem(THREAT_RADAR_PINNED_ANALYSIS_KEY);
       return null;
@@ -3231,6 +4391,7 @@ function formatThreatRadarError(message: string, range: RadarTimeRange): string 
 
 function loadThreatRadarLayout(): RadarLayoutItem[] {
   const fallback: RadarLayoutItem[] = [
+    { id: "identity" },
     { id: "sources" },
     { id: "destinations" },
     { id: "outbound" },
@@ -3250,7 +4411,7 @@ function loadThreatRadarLayout(): RadarLayoutItem[] {
         const record = typeof item === "object" && item !== null ? (item as Partial<RadarLayoutItem>) : {};
         const legacyId = (record as { id?: string }).id;
         const id = legacyId === "lead" ? "ports" : legacyId;
-        if (id !== "sources" && id !== "destinations" && id !== "outbound" && id !== "denied" && id !== "ports" && id !== "indicators" && id !== "review") return null;
+        if (id !== "identity" && id !== "sources" && id !== "destinations" && id !== "outbound" && id !== "denied" && id !== "ports" && id !== "indicators" && id !== "review") return null;
         ids.add(id);
         return {
           id,
@@ -3280,6 +4441,7 @@ function loadThreatRadarLayout(): RadarLayoutItem[] {
 }
 
 function defaultRadarCardSize(id: RadarCardId): { width: number; height: number } {
+  if (id === "identity") return { width: 980, height: 460 };
   if (id === "ports" || id === "indicators" || id === "review") return { width: 760, height: 440 };
   return { width: 820, height: 420 };
 }
@@ -3349,6 +4511,7 @@ function sortRadarSuspects(suspects: ThreatRadarSuspect[], sort: RadarSort): Thr
     if (sort.field === "events") comparison = left.events - right.events;
     if (sort.field === "denied") comparison = (left.deniedEvents ?? 0) - (right.deniedEvents ?? 0);
     if (sort.field === "outbound") comparison = (left.outboundEvents ?? 0) - (right.outboundEvents ?? 0);
+    if (sort.field === "bytes") comparison = (left.outboundBytes ?? 0) - (right.outboundBytes ?? 0);
     if (sort.field === "infrastructure") comparison = left.infrastructureCount - right.infrastructureCount;
     if (sort.field === "ports") comparison = left.destinationPorts - right.destinationPorts;
     if (sort.field === "history") comparison = (left.eventDelta ?? 0) - (right.eventDelta ?? 0) || (left.observations ?? 1) - (right.observations ?? 1);
@@ -3357,6 +4520,88 @@ function sortRadarSuspects(suspects: ThreatRadarSuspect[], sort: RadarSort): Thr
     return sort.direction === "asc" ? comparison : -comparison;
   });
   return sorted;
+}
+
+function normalizeIdentityAnomalies(anomalies: ThreatRadarIdentityAnomaly[] | undefined): IdentityAnomalyRow[] {
+  if (!Array.isArray(anomalies)) return [];
+  return anomalies.flatMap((anomaly, index) => {
+    if (!anomaly || typeof anomaly !== "object") return [];
+    const account = firstIdentityText(anomaly.identity, anomaly.account, anomaly.userName, anomaly.user, anomaly.email);
+    const email = firstIdentityText(anomaly.email, anomaly.identityType === "email" || account.includes("@") ? account : undefined);
+    const destination = firstIdentityText(anomaly.destinationIp, anomaly.destination, anomaly.destinationService, anomaly.service);
+    const service = firstIdentityText(anomaly.service, anomaly.destinationService);
+    const evidence = Array.isArray(anomaly.evidence)
+      ? anomaly.evidence.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+      : typeof anomaly.evidence === "string" && anomaly.evidence.trim()
+        ? [anomaly.evidence.trim()]
+        : Array.isArray(anomaly.reasons)
+          ? anomaly.reasons.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+          : [];
+    const infrastructureCount = Array.isArray(anomaly.infrastructures)
+      ? anomaly.infrastructures.length
+      : identityNumber(anomaly.infrastructureCount ?? anomaly.infrastructures);
+    const sourceIp = firstIdentityText(anomaly.sourceIp);
+    const firstSeen = firstIdentityText(anomaly.firstSeen);
+    const lastSeen = firstIdentityText(anomaly.lastSeen);
+    const id = firstIdentityText(anomaly.id, `${account}:${sourceIp}:${destination}:${firstSeen}:${index}`);
+    return [{
+      id,
+      account,
+      email,
+      sourceIp,
+      destination,
+      service,
+      events: identityNumber(anomaly.events),
+      failures: identityNumber(anomaly.failures ?? anomaly.failedEvents),
+      successes: identityNumber(anomaly.successes ?? anomaly.successfulEvents),
+      infrastructureCount,
+      firstSeen,
+      lastSeen,
+      score: identityNumber(anomaly.score),
+      severity: anomaly.severity ?? "low",
+      promoted: anomaly.promoted === true,
+      baselineObservations: identityNumber(anomaly.baselineObservations),
+      evidence
+    }];
+  });
+}
+
+function sortIdentityAnomalies(anomalies: IdentityAnomalyRow[], sort: IdentitySort): IdentityAnomalyRow[] {
+  return [...anomalies].sort((left, right) => {
+    let comparison = 0;
+    if (sort.field === "account") comparison = `${left.account} ${left.email}`.localeCompare(`${right.account} ${right.email}`, undefined, { numeric: true });
+    if (sort.field === "sourceIp") comparison = left.sourceIp.localeCompare(right.sourceIp, undefined, { numeric: true });
+    if (sort.field === "destination") comparison = `${left.destination} ${left.service}`.localeCompare(`${right.destination} ${right.service}`, undefined, { numeric: true });
+    if (sort.field === "events") comparison = left.events - right.events;
+    if (sort.field === "failures") comparison = left.failures - right.failures;
+    if (sort.field === "successes") comparison = left.successes - right.successes;
+    if (sort.field === "infrastructure") comparison = left.infrastructureCount - right.infrastructureCount;
+    if (sort.field === "firstSeen") comparison = identityTimestamp(left.firstSeen) - identityTimestamp(right.firstSeen);
+    if (sort.field === "lastSeen") comparison = identityTimestamp(left.lastSeen) - identityTimestamp(right.lastSeen);
+    if (sort.field === "score") comparison = left.score - right.score;
+    if (sort.field === "evidence") comparison = left.evidence.join(" ").localeCompare(right.evidence.join(" "));
+    if (comparison === 0) comparison = left.account.localeCompare(right.account, undefined, { numeric: true });
+    return sort.direction === "asc" ? comparison : -comparison;
+  });
+}
+
+function firstIdentityText(...values: Array<string | undefined>): string {
+  const value = values.find((item) => typeof item === "string" && item.trim().length > 0);
+  return value?.trim() ?? "--";
+}
+
+function identityNumber(value: number | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+function identityTimestamp(value: string): number {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function formatIdentityTimestamp(value: string): string {
+  const timestamp = identityTimestamp(value);
+  return timestamp > 0 ? new Date(timestamp).toLocaleString() : value;
 }
 
 function formatRadarSignal(value: string): string {

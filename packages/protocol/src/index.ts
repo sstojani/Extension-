@@ -22,6 +22,13 @@ export const bridgeActions = [
   "alerts.rule.add",
   "alerts.rule.remove",
   "alerts.history.clear",
+  "alerts.test",
+  "threatRadar.feedback.list",
+  "threatRadar.feedback.save",
+  "cases.list",
+  "cases.create",
+  "cases.update",
+  "cases.note",
   "config.get",
   "config.save",
   "logs.search",
@@ -253,7 +260,17 @@ export const threatRadarAgentConfigSchema = z
     intervalMinutes: z.number().int().min(5).max(60).default(15),
     indexPattern: z.string().min(1).max(512).default("logs-*"),
     timestampField: z.string().min(1).max(256).default("@timestamp"),
-    candidateExclusions: z.array(z.string().trim().min(1).max(256)).max(200).default([])
+    candidateExclusions: z.array(z.string().trim().min(1).max(256)).max(200).default([]),
+    candidateExceptions: z.array(z.object({
+      id: z.string().min(1).max(128),
+      scope: z.enum(["ip", "domain", "hash", "identity", "keyword", "value"]),
+      value: z.string().trim().min(1).max(256),
+      field: z.string().trim().min(1).max(128).optional(),
+      reason: z.string().trim().max(500).optional(),
+      expiresAt: z.string().trim().max(64).optional(),
+      enabled: z.boolean().default(true),
+      createdAt: z.string().trim().max(64)
+    }).strict()).max(500).default([])
   })
   .strict();
 
