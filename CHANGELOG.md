@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.12.3 - 2026-09-22
+
+- Restored the Chrome content script as a standalone classic script while retaining the exact Tailscale origin allowlist.
+- Added a production-build verification step that rejects module imports and missing Tailscale permissions before packaging.
+
 ## 0.12.2 - 2026-09-22
 
 - Added the port-specific Tailscale deployment origin to the bridge relay, external messaging allowlist, tab recovery, and extension permissions.

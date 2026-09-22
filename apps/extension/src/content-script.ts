@@ -1,6 +1,11 @@
-import { DEFAULT_ALLOWED_ORIGINS } from "./config";
-
 var socWatchBridgeWindow = window as unknown as { __socWatchBridgeRelayActive?: boolean };
+// Manifest content scripts are classic scripts, so this allowlist must stay dependency-free.
+const SOC_WATCH_WEB_ORIGINS = [
+  "https://socwatch.internal",
+  "https://laptop-1.tail029be8.ts.net:8443",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173"
+] as const;
 
 if (isAllowedSocWatchOrigin(window.location) && !socWatchBridgeWindow.__socWatchBridgeRelayActive) {
   socWatchBridgeWindow.__socWatchBridgeRelayActive = true;
@@ -151,5 +156,5 @@ function isHello(message: unknown): boolean {
 }
 
 function isAllowedSocWatchOrigin(location: Location): boolean {
-  return (DEFAULT_ALLOWED_ORIGINS as readonly string[]).includes(location.origin);
+  return (SOC_WATCH_WEB_ORIGINS as readonly string[]).includes(location.origin);
 }
