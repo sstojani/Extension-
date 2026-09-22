@@ -2,6 +2,7 @@ var socWatchBridgeWindow = window as unknown as { __socWatchBridgeRelayActive?: 
 // Manifest content scripts are classic scripts, so this allowlist must stay dependency-free.
 const SOC_WATCH_WEB_ORIGINS = [
   "https://socwatch.internal",
+  "https://laptop-1.tail029be8.ts.net",
   "https://laptop-1.tail029be8.ts.net:8443",
   "http://localhost:5173",
   "http://127.0.0.1:5173"

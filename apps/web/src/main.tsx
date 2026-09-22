@@ -553,17 +553,35 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (extensionPresence !== "missing") return;
+    let checking = false;
+    const checkAgain = () => {
+      if (checking) return;
+      checking = true;
+      void verifyExtensionInstallation(true).finally(() => { checking = false; });
+    };
+    window.addEventListener("focus", checkAgain);
+    const interval = window.setInterval(checkAgain, 5000);
+    return () => {
+      window.removeEventListener("focus", checkAgain);
+      window.clearInterval(interval);
+    };
+  }, [extensionPresence]);
+
+  useEffect(() => {
     if (active !== "Threat Radar") return;
     void loadBridgeConfig(true);
     const refresh = window.setInterval(() => void loadBridgeConfig(true), 15000);
     return () => window.clearInterval(refresh);
   }, [active]);
 
-  async function verifyExtensionInstallation() {
+  async function verifyExtensionInstallation(background = false) {
     const generation = extensionDetectionGenerationRef.current + 1;
     extensionDetectionGenerationRef.current = generation;
-    setExtensionPresence("checking");
-    setExtensionInstallReason("Checking this browser profile for SOC Watch Bridge.");
+    if (!background) {
+      setExtensionPresence("checking");
+      setExtensionInstallReason("Checking this browser profile for SOC Watch Bridge.");
+    }
 
     const detection = await detectBridgeExtension();
     if (generation !== extensionDetectionGenerationRef.current) return;
@@ -701,8 +719,7 @@ function App() {
   }
 
   function saveInstallExtensionIdAndReload() {
-    const normalizedId = extensionId.trim();
-    if (normalizedId) saveExtensionId(normalizedId);
+    saveExtensionId(extensionId);
     window.location.reload();
   }
 
@@ -1237,7 +1254,7 @@ function ExtensionInstallGate({
         <aside className="install-verification" aria-labelledby="verify-install-title">
           <div className="install-verification-icon"><Puzzle size={24} aria-hidden="true" /></div>
           <h2 id="verify-install-title">Verify installation</h2>
-          <p>Chrome must reload this page once after an unpacked extension is installed so the secure page relay can start.</p>
+          <p>After loading the extension, return here. If Chrome has not started the page relay, reload this tab once.</p>
 
           <dl className="install-package-facts">
             <div><dt>Extension</dt><dd>SOC Watch Bridge</dd></div>

@@ -23,7 +23,8 @@ export interface BridgeStream {
 }
 
 export function getExtensionId(): string | undefined {
-  return localStorage.getItem("socWatchExtensionId") || configuredExtensionId || knownDevExtensionId;
+  const localHost = ["localhost", "127.0.0.1"].includes(window.location.hostname);
+  return localStorage.getItem("socWatchExtensionId") || configuredExtensionId || (localHost ? knownDevExtensionId : undefined);
 }
 
 export function saveExtensionId(value: string): void {
@@ -64,7 +65,7 @@ export function detectBridgeExtension(timeoutMs = 3000): Promise<ExtensionDetect
       finish({
         installed: false,
         expectedExtensionId,
-        reason: "SOC Watch Bridge was not detected in this browser profile."
+        reason: `SOC Watch Bridge did not respond on ${window.location.origin}. Check its Site access permission, then reload this tab.`
       });
     }, timeoutMs);
 

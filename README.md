@@ -2,7 +2,7 @@
 
 SOC Watch is an internal cybersecurity console for Elastic/Kibana environments. It is split into a Chrome Manifest V3 bridge extension and a separate web application. The bridge reuses the analyst's already-authenticated Kibana browser session through `fetch(..., { credentials: "include" })` without reading, storing, or forwarding cookies or authentication material.
 
-Current product version: `0.12.3`. The web app verifies the bridge before opening the console, and the sidebar shows both the web and loaded bridge versions so analysts can confirm that Chrome is using the expected build.
+Current product version: `0.12.4`. The web app verifies the bridge before opening the console, and the sidebar shows both the web and loaded bridge versions so analysts can confirm that Chrome is using the expected build.
 
 ## Workspace
 
@@ -38,6 +38,8 @@ npm.cmd run dev:all
 The web app hot-reloads in the browser. The extension watcher rebuilds `apps/extension/dist`; use the reload button on `chrome://extensions` to activate the updated extension service worker.
 
 Each production extension build also creates `apps/web/public/downloads/soc-watch-bridge-v<version>.zip`. This is the version-matched package offered by the web installation screen. Extract it, open `chrome://extensions`, enable Developer mode, choose **Load unpacked**, and select the extracted folder containing `manifest.json`.
+
+The packaged bridge currently trusts the exact HTTPS origins `https://laptop-1.tail029be8.ts.net` and `https://laptop-1.tail029be8.ts.net:8443`. If the console moves to another origin, update the manifest and both extension runtime allowlists, then rebuild and reinstall the bridge. Reload the console tab once after installing an unpacked extension if Chrome has not injected its content script yet.
 
 Configure the web app with the extension ID:
 

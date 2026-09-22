@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.4 - 2026-09-23
+
+- Added the active Tailscale HTTPS root to the bridge's manifest, content relay, and service-worker allowlists while retaining the dedicated port.
+- Made the installation gate recheck automatically after Chrome regains focus and stopped showing a development extension ID on deployed sites.
+- Verified both approved deployment origins in the packaged extension build.
+
 ## 0.12.3 - 2026-09-22
 
 - Restored the Chrome content script as a standalone classic script while retaining the exact Tailscale origin allowlist.
