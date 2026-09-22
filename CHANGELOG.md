@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.2 - 2026-09-22
+
+- Added the port-specific Tailscale deployment origin to the bridge relay, external messaging allowlist, tab recovery, and extension permissions.
+- Kept the original application on the hostname's standard HTTPS port outside the SOC Watch bridge trust boundary.
+- Fixed remote unpacked installations so the page relay discovers and saves Chrome's actual per-profile extension ID.
+- Hardened origin validation to compare ports as well as scheme and hostname.
+- Cleaned extension output before production packaging so obsolete bundles cannot remain in the downloadable ZIP.
+
 ## 0.12.1 - 2026-09-22
 
 - Updated Vitest and its nested Vite, mocker, and esbuild toolchain to patched releases.

@@ -334,7 +334,7 @@ function safeDisconnect(port: chrome.runtime.Port): void {
 
 async function ensureSocWatchRelays(): Promise<void> {
   const tabs = await chrome.tabs.query({
-    url: ["https://socwatch.internal/*", "http://localhost/*", "http://127.0.0.1/*"]
+    url: DEFAULT_ALLOWED_ORIGINS.map((origin) => `${origin}/*`)
   });
 
   for (const tab of tabs) {

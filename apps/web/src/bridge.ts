@@ -302,9 +302,3 @@ function sendViaWindowRelay<TParams, TData>(request: BridgeRequest<TParams>): Pr
     window.postMessage({ source: "soc-watch-web", message: request }, window.location.origin);
   });
 }
-
-function isSocWatchWebOrigin(): boolean {
-  if (window.location.origin === "https://socwatch.internal") return true;
-  if (window.location.protocol !== "http:") return false;
-  return window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
-}

@@ -43,6 +43,7 @@ describe("protocol validation", () => {
 describe("origin validation", () => {
   it("requires exact approved origins", () => {
     expect(isAllowedOrigin("https://socwatch.internal/app", ["https://socwatch.internal"])).toBe(true);
+    expect(isAllowedOrigin("https://socwatch.internal:8443/app", ["https://socwatch.internal"])).toBe(false);
     expect(isAllowedOrigin("https://evil.example/app", ["https://socwatch.internal"])).toBe(false);
   });
 });

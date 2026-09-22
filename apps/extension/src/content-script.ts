@@ -1,3 +1,5 @@
+import { DEFAULT_ALLOWED_ORIGINS } from "./config";
+
 var socWatchBridgeWindow = window as unknown as { __socWatchBridgeRelayActive?: boolean };
 
 if (isAllowedSocWatchOrigin(window.location) && !socWatchBridgeWindow.__socWatchBridgeRelayActive) {
@@ -149,7 +151,5 @@ function isHello(message: unknown): boolean {
 }
 
 function isAllowedSocWatchOrigin(location: Location): boolean {
-  if (location.origin === "https://socwatch.internal") return true;
-  if (location.protocol !== "http:") return false;
-  return location.hostname === "localhost" || location.hostname === "127.0.0.1";
+  return (DEFAULT_ALLOWED_ORIGINS as readonly string[]).includes(location.origin);
 }

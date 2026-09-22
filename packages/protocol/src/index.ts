@@ -297,10 +297,7 @@ export function isAllowedOrigin(senderUrl: string | undefined, allowedOrigins: r
   if (!senderUrl) return false;
   try {
     const url = new URL(senderUrl);
-    return allowedOrigins.some((allowedOrigin) => {
-      const allowedUrl = new URL(allowedOrigin);
-      return url.protocol === allowedUrl.protocol && url.hostname === allowedUrl.hostname;
-    });
+    return allowedOrigins.some((allowedOrigin) => url.origin === new URL(allowedOrigin).origin);
   } catch {
     return false;
   }
