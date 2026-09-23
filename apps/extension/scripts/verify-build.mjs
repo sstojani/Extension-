@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { createContext, runInContext } from "node:vm";
 
 const distRoot = new URL("../dist/", import.meta.url);
 const contentScript = await readFile(new URL("content-script.js", distRoot), "utf8");
@@ -25,4 +26,35 @@ for (const origin of tailscaleOrigins) {
   }
 }
 
-console.log("Verified standalone content script and both Tailscale deployment origins.");
+const announcements = [];
+let connections = 0;
+const page = {
+  location: { origin: tailscaleOrigins[0] },
+  postMessage(message) { announcements.push(message); },
+  addEventListener() {},
+  setInterval() { return 1; },
+  setTimeout() { return 1; },
+  clearInterval() {}
+};
+const chrome = {
+  runtime: {
+    id: "abcdefghijklmnopabcdefghijklmnop",
+    getManifest() { return manifest; },
+    connect() {
+      connections += 1;
+      return {
+        onMessage: { addListener() {} },
+        onDisconnect: { addListener() {} },
+        postMessage() {}
+      };
+    }
+  }
+};
+const context = createContext({ window: page, chrome });
+runInContext(contentScript, context);
+runInContext(contentScript, context);
+if (connections !== 1 || announcements.filter(({ message }) => message?.type === "soc-watch.relay-ready").length !== 1) {
+  throw new Error("Repeated content-script injection must reuse the existing relay without redeclaration or duplicate connections.");
+}
+
+console.log("Verified standalone, repeat-safe content script and both Tailscale deployment origins.");

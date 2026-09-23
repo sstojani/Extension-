@@ -1,3 +1,4 @@
+(() => {
 var socWatchBridgeWindow = window as unknown as { __socWatchBridgeRelayActive?: boolean };
 // Manifest content scripts are classic scripts, so this allowlist must stay dependency-free.
 const SOC_WATCH_WEB_ORIGINS = [
@@ -159,3 +160,4 @@ function isHello(message: unknown): boolean {
 function isAllowedSocWatchOrigin(location: Location): boolean {
   return (SOC_WATCH_WEB_ORIGINS as readonly string[]).includes(location.origin);
 }
+})();

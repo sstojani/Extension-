@@ -583,7 +583,7 @@ function App() {
       setExtensionInstallReason("Checking this browser profile for SOC Watch Bridge.");
     }
 
-    const detection = await detectBridgeExtension();
+    const detection = await detectBridgeExtension(3000, SOC_WATCH_WEB_VERSION);
     if (generation !== extensionDetectionGenerationRef.current) return;
 
     if (!detection.installed) {
@@ -610,7 +610,7 @@ function App() {
   }
 
   async function verifyExtensionStillInstalled() {
-    const detection = await detectBridgeExtension(1800);
+    const detection = await detectBridgeExtension(1800, SOC_WATCH_WEB_VERSION);
     if (detection.installed) return;
     connectionGenerationRef.current += 1;
     streamRef.current?.disconnect();
@@ -1235,14 +1235,14 @@ function ExtensionInstallGate({
             </li>
             <li>
               <span>2</span>
-              <div><strong>Open Chrome extensions</strong><p>Paste <code>{extensionAddress}</code> into the address bar and enable Developer mode.</p></div>
+              <div><strong>Open Chrome extensions</strong><p>Paste <code>{extensionAddress}</code> into the address bar, remove older SOC Watch Bridge versions, and enable Developer mode.</p></div>
               <button className="icon-button" type="button" title="Copy Chrome extensions address" aria-label="Copy Chrome extensions address" onClick={() => void copyValue(extensionAddress, "address")}>
                 {copied === "address" ? <CheckCircle2 size={18} aria-hidden="true" /> : <Copy size={18} aria-hidden="true" />}
               </button>
             </li>
             <li>
               <span>3</span>
-              <div><strong>Load the extracted extension</strong><p>Select <b>Load unpacked</b>, then choose the extracted folder containing <code>manifest.json</code>.</p></div>
+              <div><strong>Load the extracted extension</strong><p>Select <b>Load unpacked</b>, then choose the extracted folder with <code>manifest.json</code> directly inside it.</p></div>
             </li>
             <li>
               <span>4</span>

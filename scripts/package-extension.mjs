@@ -13,6 +13,8 @@ const extensionRoot = join(projectRoot, "apps", "extension");
 const distRoot = join(extensionRoot, "dist");
 const manifest = JSON.parse(await readFile(join(distRoot, "manifest.json"), "utf8"));
 const version = String(manifest.version);
+const webPackage = JSON.parse(await readFile(join(projectRoot, "apps", "web", "package.json"), "utf8"));
+if (version !== webPackage.version) throw new Error("Web and extension package versions must match.");
 const packageFolder = `soc-watch-bridge-v${version}`;
 const outputRoot = join(projectRoot, "apps", "web", "public", "downloads");
 const outputPath = join(outputRoot, `${packageFolder}.zip`);
@@ -21,20 +23,24 @@ const files = await collectFiles(distRoot);
 const entries = [];
 
 for (const absolutePath of files) {
-  const archivePath = `${packageFolder}/${relative(distRoot, absolutePath).split(sep).join("/")}`;
+  const archivePath = relative(distRoot, absolutePath).split(sep).join("/");
   entries.push({ name: archivePath, data: await readFile(absolutePath) });
 }
 
+if (!entries.some((entry) => entry.name === "manifest.json")) {
+  throw new Error("The extension package must contain manifest.json at its root.");
+}
+
 entries.push({
-  name: `${packageFolder}/INSTALL.txt`,
+  name: "INSTALL.txt",
   data: Buffer.from([
     "SOC Watch Bridge installation",
     "",
     "1. Extract this ZIP to a permanent folder.",
     "2. Open chrome://extensions in Google Chrome.",
-    "3. Enable Developer mode.",
+    "3. Remove older SOC Watch Bridge versions and enable Developer mode.",
     "4. Select Load unpacked.",
-    `5. Select the extracted ${packageFolder} folder containing manifest.json.`,
+    "5. Select the extracted folder containing manifest.json directly inside it.",
     "6. Return to SOC Watch. Reload its tab once if the install screen remains open.",
     "7. If still locked, allow Site access for SOC Watch in Chrome and paste the actual extension ID as a fallback.",
     "8. Select Reload and Verify in SOC Watch.",

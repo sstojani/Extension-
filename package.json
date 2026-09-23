@@ -1,6 +1,6 @@
 {
   "name": "soc-watch",
-  "version": "0.12.4",
+  "version": "0.12.5",
   "private": true,
   "description": "SOC Watch internal ELK monitoring, threat hunting, and fleet health platform.",
   "type": "module",

@@ -3,7 +3,7 @@ import { detectBridgeExtension, getExtensionId } from "./bridge";
 
 afterEach(() => vi.unstubAllGlobals());
 
-function mockServerPage(replyToHello: boolean) {
+function mockServerPage(versions: string[]) {
   const origin = "https://laptop-1.tail029be8.ts.net";
   const listeners = new Set<(event: MessageEvent) => void>();
   const page = {
@@ -11,8 +11,7 @@ function mockServerPage(replyToHello: boolean) {
     addEventListener(_type: string, listener: (event: MessageEvent) => void) { listeners.add(listener); },
     removeEventListener(_type: string, listener: (event: MessageEvent) => void) { listeners.delete(listener); },
     postMessage() {
-      if (!replyToHello) return;
-      queueMicrotask(() => {
+      for (const version of versions) queueMicrotask(() => {
         for (const listener of listeners) {
           listener({
             source: page,
@@ -23,7 +22,7 @@ function mockServerPage(replyToHello: boolean) {
                 type: "soc-watch.relay-ready",
                 extensionId: "abcdefghijklmnopabcdefghijklmnop",
                 extensionName: "SOC Watch Bridge",
-                extensionVersion: "0.12.4"
+                extensionVersion: version
               }
             }
           } as unknown as MessageEvent);
@@ -39,18 +38,26 @@ function mockServerPage(replyToHello: boolean) {
 
 describe("server-hosted bridge discovery", () => {
   it("uses the relay-reported extension ID instead of a local development ID", async () => {
-    mockServerPage(true);
+    mockServerPage(["0.12.4", "0.12.5"]);
     expect(getExtensionId()).toBeUndefined();
-    expect(await detectBridgeExtension(100)).toMatchObject({
+    expect(await detectBridgeExtension(100, "0.12.5")).toMatchObject({
       installed: true,
       extensionId: "abcdefghijklmnopabcdefghijklmnop",
-      extensionVersion: "0.12.4",
+      extensionVersion: "0.12.5",
       transport: "page-relay"
     });
   });
 
   it("keeps the installation gate locked when no extension responds", async () => {
-    mockServerPage(false);
-    expect(await detectBridgeExtension(10)).toMatchObject({ installed: false });
+    mockServerPage([]);
+    expect(await detectBridgeExtension(10, "0.12.5")).toMatchObject({ installed: false });
+  });
+
+  it("identifies an outdated bridge instead of accepting it", async () => {
+    mockServerPage(["0.12.4"]);
+    expect(await detectBridgeExtension(10, "0.12.5")).toMatchObject({
+      installed: false,
+      reason: expect.stringContaining("Bridge v0.12.4 is installed")
+    });
   });
 });

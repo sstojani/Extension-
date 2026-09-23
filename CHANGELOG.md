@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.5 - 2026-09-23
+
+- Isolated the classic content script so Chrome can inject it repeatedly without redeclaring top-level bindings or creating duplicate relays.
+- Packaged `manifest.json` at the ZIP root so a normal extraction produces a folder Chrome can load on the first attempt.
+- Added build checks for repeated injection, the ZIP manifest location, and matching web/bridge versions.
+- Kept outdated bridge installations from unlocking a newer web console and clarified replacement steps.
+
 ## 0.12.4 - 2026-09-23
 
 - Added the active Tailscale HTTPS root to the bridge's manifest, content relay, and service-worker allowlists while retaining the dedicated port.

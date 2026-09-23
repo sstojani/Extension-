@@ -31,10 +31,11 @@ export function saveExtensionId(value: string): void {
   localStorage.setItem("socWatchExtensionId", value.trim());
 }
 
-export function detectBridgeExtension(timeoutMs = 3000): Promise<ExtensionDetection> {
+export function detectBridgeExtension(timeoutMs = 3000, requiredVersion?: string): Promise<ExtensionDetection> {
   return new Promise((resolve) => {
     const expectedExtensionId = getExtensionId();
     let settled = false;
+    let incompatibleVersion: string | undefined;
     const finish = (result: ExtensionDetection) => {
       if (settled) return;
       settled = true;
@@ -43,13 +44,21 @@ export function detectBridgeExtension(timeoutMs = 3000): Promise<ExtensionDetect
       resolve(result);
     };
 
+    const accept = (result: Extract<ExtensionDetection, { installed: true }>) => {
+      if (requiredVersion && result.extensionVersion !== requiredVersion) {
+        incompatibleVersion = result.extensionVersion ?? "unknown";
+        return;
+      }
+      finish(result);
+    };
+
     const listener = (event: MessageEvent) => {
       if (event.source !== window || event.origin !== window.location.origin) return;
       const data = typeof event.data === "object" && event.data !== null ? (event.data as Record<string, unknown>) : {};
       if (data.source !== "soc-watch-content") return;
       const envelope = typeof data.message === "object" && data.message !== null ? (data.message as Record<string, unknown>) : {};
       if (envelope.type !== "soc-watch.relay-ready" || typeof envelope.extensionId !== "string") return;
-      finish({
+      accept({
         installed: true,
         extensionId: envelope.extensionId,
         extensionName: typeof envelope.extensionName === "string" ? envelope.extensionName : "SOC Watch Bridge",
@@ -65,7 +74,9 @@ export function detectBridgeExtension(timeoutMs = 3000): Promise<ExtensionDetect
       finish({
         installed: false,
         expectedExtensionId,
-        reason: `SOC Watch Bridge did not respond on ${window.location.origin}. Check its Site access permission, then reload this tab.`
+        reason: incompatibleVersion && requiredVersion
+          ? `Bridge v${incompatibleVersion} is installed, but Web v${requiredVersion} needs the matching Bridge. Remove the old extension and load the new package.`
+          : `SOC Watch Bridge did not respond on ${window.location.origin}. Check its Site access permission, then reload this tab.`
       });
     }, timeoutMs);
 
@@ -85,7 +96,7 @@ export function detectBridgeExtension(timeoutMs = 3000): Promise<ExtensionDetect
         (response: BridgeResponse<{ extension?: string; version?: string; status?: string }> | undefined) => {
           const lastError = chrome.runtime.lastError;
           if (lastError || !response?.success || response.data.status !== "ok") return;
-          finish({
+          accept({
             installed: true,
             extensionId: expectedExtensionId,
             extensionName: response.data.extension ?? "SOC Watch Bridge",
