@@ -9,12 +9,13 @@ import {
   mapKibanaStatus,
   sanitizeFleetAgent,
   sanitizeFleetSummary,
-  threatRadarAgentConfigSchema,
   threatRadarAnalyzeParamsSchema,
   type BridgeErrorCode,
   type DataViewSummary,
   type KibanaStatus,
-  type SanitizedFleetAgent
+  type SanitizedFleetAgent,
+  type ThreatRadarAgentConfig,
+  type ThreatRadarCardId
 } from "@soc-watch/protocol";
 import { classifyIOC } from "@soc-watch/ioc";
 import { DEFAULT_KIBANA_BASE_URL, DEFAULT_SPACE_ID } from "./config";
@@ -31,6 +32,12 @@ import {
   type IdentityObservation
 } from "./identity-analysis";
 import { getKnownInfrastructure, isRoutineKnownInfrastructureTraffic, KNOWN_PUBLIC_DNS_IPS } from "./known-infrastructure";
+import {
+  enabledThreatSignalRules,
+  getThreatRadarCardRule,
+  normalizeThreatRadarAgentConfig,
+  threatRadarRiskyPorts
+} from "./threat-radar-policy";
 
 export class BridgeOperationError extends Error {
   constructor(
@@ -325,24 +332,24 @@ export async function searchIOCBatch(params: {
 export async function analyzeThreatRadar(params: unknown) {
   const parsed = threatRadarAnalyzeParamsSchema.parse(params);
   const config = await readRuntimeConfig();
+  const stored = await chrome.storage.local.get(["googleThreatIntelApiKey", "threatRadarAgentConfig"]);
+  const gtiApiKey = typeof stored.googleThreatIntelApiKey === "string" ? stored.googleThreatIntelApiKey.trim() : "";
+  const agentConfig = normalizeThreatRadarAgentConfig(stored.threatRadarAgentConfig ?? {});
   const searchResult = parsed.from === "now/d"
-    ? await runStagedThreatRadarSearch(config, parsed)
+    ? await runStagedThreatRadarSearch(config, parsed, agentConfig)
     : {
-        raw: await runThreatRadarSearch(config, parsed.indexPattern, buildThreatRadarBody(parsed)),
+        raw: await runThreatRadarSearch(config, parsed.indexPattern, buildThreatRadarBody(parsed, agentConfig)),
         strategy: "single" as const,
         completedStages: ["all evidence"],
         skippedStages: []
       };
   const raw = searchResult.raw;
   const dataHealth = await readThreatRadarDataHealth(config, parsed, searchResult);
-  const stored = await chrome.storage.local.get(["googleThreatIntelApiKey", "threatRadarAgentConfig"]);
-  const gtiApiKey = typeof stored.googleThreatIntelApiKey === "string" ? stored.googleThreatIntelApiKey.trim() : "";
-  const agentConfig = threatRadarAgentConfigSchema.parse(stored.threatRadarAgentConfig ?? {});
   const enrichmentPoolSize = Math.min(100, Math.max(parsed.size * 4, 60));
   const indicatorPoolSize = Math.min(120, Math.max(parsed.size * 4, 80));
   const externalSources = rankThreatRadarFindings([
-    ...summarizeThreatRadarEntities(raw, "source_entities", "source"),
-    ...summarizeThreatRadarEntities(raw, "client_entities", "source")
+    ...summarizeThreatRadarEntities(raw, "source_entities", "source", agentConfig.riskyPorts),
+    ...summarizeThreatRadarEntities(raw, "client_entities", "source", agentConfig.riskyPorts)
   ].filter(isActionableThreatFinding).filter((finding) => !isExcludedCandidate({
     ip: finding.ip,
     sourceIp: finding.sourceIp,
@@ -358,8 +365,8 @@ export async function analyzeThreatRadar(params: unknown) {
     }
   }, agentConfig.candidateExclusions, agentConfig.candidateExceptions)), enrichmentPoolSize);
   const suspiciousDestinations = rankThreatRadarFindings([
-    ...summarizeThreatRadarEntities(raw, "destination_entities", "destination"),
-    ...summarizeThreatRadarEntities(raw, "server_entities", "destination")
+    ...summarizeThreatRadarEntities(raw, "destination_entities", "destination", agentConfig.riskyPorts),
+    ...summarizeThreatRadarEntities(raw, "server_entities", "destination", agentConfig.riskyPorts)
   ].filter(isActionableThreatFinding).filter((finding) => !isExcludedCandidate({
     ip: finding.ip,
     sourceIp: finding.sourceIp,
@@ -381,20 +388,25 @@ export async function analyzeThreatRadar(params: unknown) {
     (await enrichThreatRadarSuspects(suspects, gtiApiKey)).map(removeUnsupportedThreatLabels),
     enrichmentPoolSize
   );
-  const enriched = rankThreatRadarFindings(assessed.filter(isConfirmedSuspiciousFinding), parsed.size);
-  const reviewCandidates = rankThreatRadarFindings(
+  const confirmedFindings = rankThreatRadarFindings(assessed.filter(isConfirmedSuspiciousFinding), enrichmentPoolSize);
+  const reviewCandidates = applyThreatRadarCardRule(rankThreatRadarFindings(
     assessed
       .filter((finding) => !isConfirmedSuspiciousFinding(finding))
       .filter(isInvestigationCandidate),
-    parsed.size
-  );
+    enrichmentPoolSize
+  ), agentConfig, "review", parsed.size);
   const domainIndicators = [
     ...summarizeThreatRadarIndicators(raw, "dns_domain_entities", "domain"),
     ...summarizeThreatRadarIndicators(raw, "url_domain_entities", "domain"),
     ...summarizeThreatRadarIndicators(raw, "destination_domain_entities", "domain")
   ];
   const assessedIdentities = await analyzeThreatRadarIdentities(raw, indicatorPoolSize, agentConfig.candidateExclusions, agentConfig.candidateExceptions);
-  const identityAnomalies = assessedIdentities.filter((item) => item.promoted).slice(0, parsed.size);
+  const identityAnomalies = applyThreatRadarCardRule(
+    assessedIdentities.filter((item) => item.promoted),
+    agentConfig,
+    "identity",
+    parsed.size
+  );
   const reputationDomainIndicators = domainIndicators.flatMap((indicator) => {
     const value = normalizeReputationDomain(indicator.value);
     return value ? [{ ...indicator, value }] : [];
@@ -423,36 +435,51 @@ export async function analyzeThreatRadar(params: unknown) {
   }, agentConfig.candidateExclusions, agentConfig.candidateExceptions)), indicatorPoolSize);
   const assessedIndicators = (await enrichThreatRadarIndicators(indicatorCandidates, gtiApiKey))
     .map(removeUnsupportedIndicatorLabels);
-  const suspiciousIndicators = rankThreatRadarIndicators(
+  const suspiciousIndicators = applyThreatRadarCardRule(rankThreatRadarIndicators(
     assessedIndicators.filter(isConfirmedSuspiciousIndicator),
-    parsed.size
-  );
-  const suspiciousOutbound = enriched
+    indicatorPoolSize
+  ), agentConfig, "indicators", parsed.size);
+  const externalSourceFindings = applyThreatRadarCardRule(confirmedFindings
+    .filter((item) => item.role === "source" && item.direction === "inbound" && isPublicIp(item.ip)), agentConfig, "sources", parsed.size);
+  const destinationFindings = applyThreatRadarCardRule(confirmedFindings
+    .filter((item) => item.role === "destination" && isPublicIp(item.ip)), agentConfig, "destinations", parsed.size);
+  const suspiciousOutbound = applyThreatRadarCardRule(confirmedFindings
     .filter((item) => item.role === "source" && item.direction === "outbound")
-    .sort((left, right) => right.score - left.score || right.outboundEvents - left.outboundEvents);
-  const deniedActivity = enriched
+    .sort((left, right) => right.score - left.score || right.outboundEvents - left.outboundEvents), agentConfig, "outbound", parsed.size);
+  const deniedActivity = applyThreatRadarCardRule(confirmedFindings
     .filter((item) => item.role === "source" && item.direction === "inbound" && isPublicIp(item.ip) && item.deniedEvents > 0)
-    .sort((left, right) => right.deniedEvents - left.deniedEvents || right.score - left.score);
+    .sort((left, right) => right.deniedEvents - left.deniedEvents || right.score - left.score), agentConfig, "denied", parsed.size);
+  const riskyPortActivity = applyThreatRadarCardRule(confirmedFindings
+    .filter((item) => item.role === "source" && item.direction === "inbound" && isPublicIp(item.ip) && item.dangerousPorts.length > 0)
+    .sort((left, right) => right.score - left.score || right.dangerousPorts.length - left.dangerousPorts.length), agentConfig, "ports", parsed.size);
+  const promotedFindings = rankThreatRadarFindings([
+    ...externalSourceFindings,
+    ...destinationFindings,
+    ...suspiciousOutbound,
+    ...deniedActivity,
+    ...riskyPortActivity
+  ], enrichmentPoolSize);
   const reputation = summarizeGtiCoverage([...assessed, ...assessedIndicators], Boolean(gtiApiKey));
-  const signals = summarizeDetectionSignals(enriched, suspiciousIndicators, identityAnomalies);
+  const signals = summarizeDetectionSignals(promotedFindings, suspiciousIndicators, identityAnomalies);
   const detectionCoverage = buildDetectionCoverage(
     signals,
     suspiciousIndicators.length,
     identityAnomalies.length,
     suspiciousOutbound.length,
     deniedActivity.length,
-    enriched.filter((item) => item.dangerousPorts.length > 0).length
+    riskyPortActivity.length
   );
   return {
     from: parsed.from,
     to: parsed.to,
     analyzedAt: new Date().toISOString(),
     eventsAnalyzed: readSearchTotal(raw),
-    suspects: enriched,
-    externalSources: enriched.filter((item) => item.role === "source" && item.direction === "inbound" && isPublicIp(item.ip)),
-    suspiciousDestinations: enriched.filter((item) => item.role === "destination" && isPublicIp(item.ip)),
+    suspects: promotedFindings,
+    externalSources: externalSourceFindings,
+    suspiciousDestinations: destinationFindings,
     suspiciousOutbound,
     deniedActivity,
+    riskyPortActivity,
     reviewCandidates,
     suspiciousIndicators,
     identityAnomalies,
@@ -484,10 +511,10 @@ export async function analyzeThreatRadar(params: unknown) {
       ]
     },
     summary: {
-      suspects: enriched.length + identityAnomalies.filter((item) => item.promoted).length,
-      critical: enriched.filter((item) => item.severity === "critical").length + identityAnomalies.filter((item) => item.promoted && item.severity === "critical").length,
-      high: enriched.filter((item) => item.severity === "high").length + identityAnomalies.filter((item) => item.promoted && item.severity === "high").length,
-      medium: enriched.filter((item) => item.severity === "medium").length + identityAnomalies.filter((item) => item.promoted && item.severity === "medium").length
+      suspects: promotedFindings.length + identityAnomalies.filter((item) => item.promoted).length,
+      critical: promotedFindings.filter((item) => item.severity === "critical").length + identityAnomalies.filter((item) => item.promoted && item.severity === "critical").length,
+      high: promotedFindings.filter((item) => item.severity === "high").length + identityAnomalies.filter((item) => item.promoted && item.severity === "high").length,
+      medium: promotedFindings.filter((item) => item.severity === "medium").length + identityAnomalies.filter((item) => item.promoted && item.severity === "medium").length
     }
   };
 }
@@ -576,9 +603,10 @@ function buildThreatRadarDataHealthBody(params: { timestampField: string; from: 
 
 async function runStagedThreatRadarSearch(
   config: KibanaRuntimeConfig,
-  params: { indexPattern: string; timestampField: string; from: string; to: string; size: number }
+  params: { indexPattern: string; timestampField: string; from: string; to: string; size: number },
+  policy: Pick<ThreatRadarAgentConfig, "signalRules" | "riskyPorts">
 ): Promise<ThreatRadarSearchResult> {
-  const stages = buildThreatRadarStageBodies(params);
+  const stages = buildThreatRadarStageBodies(params, policy);
   const merged: Record<string, unknown> = { aggregations: {} };
   const completedStages: string[] = [];
   const skippedStages: string[] = [];
@@ -609,7 +637,7 @@ async function runStagedThreatRadarSearch(
           ? await runThreatRadarSearch(
               config,
               params.indexPattern,
-              buildThreatRadarEntityDetailBody(params, stage.entity.aggregationName, stage.entity.field, candidates)
+              buildThreatRadarEntityDetailBody(params, stage.entity.aggregationName, stage.entity.field, candidates, policy)
             )
           : candidatesRaw;
       } else {
@@ -708,7 +736,10 @@ function mergeThreatRadarRawResponse(target: Record<string, unknown>, source: un
   target.timed_out = target.timed_out === true || sourceRecord.timed_out === true;
 }
 
-export function buildThreatRadarBody(params: { timestampField: string; from: string; to: string; size: number }) {
+export function buildThreatRadarBody(
+  params: { timestampField: string; from: string; to: string; size: number },
+  policy?: Pick<ThreatRadarAgentConfig, "signalRules" | "riskyPorts">
+) {
   const wideWindow = params.from === "now/d";
   const entityLimit = wideWindow
     ? Math.max(32, Math.min(50, params.size * 2))
@@ -753,11 +784,11 @@ export function buildThreatRadarBody(params: { timestampField: string; from: str
       }
     },
     aggs: {
-      source_entities: buildThreatEntityAggregation("source.ip", "destination.ip", params.timestampField, entityLimit, true),
-      destination_entities: buildThreatEntityAggregation("destination.ip", "source.ip", params.timestampField, entityLimit),
+      source_entities: buildThreatEntityAggregation("source.ip", "destination.ip", params.timestampField, entityLimit, true, policy),
+      destination_entities: buildThreatEntityAggregation("destination.ip", "source.ip", params.timestampField, entityLimit, false, policy),
       ...(wideWindow ? {} : {
-        client_entities: buildThreatEntityAggregation("client.ip", "server.ip", params.timestampField, entityLimit, true),
-        server_entities: buildThreatEntityAggregation("server.ip", "client.ip", params.timestampField, entityLimit)
+        client_entities: buildThreatEntityAggregation("client.ip", "server.ip", params.timestampField, entityLimit, true, policy),
+        server_entities: buildThreatEntityAggregation("server.ip", "client.ip", params.timestampField, entityLimit, false, policy)
       }),
       dns_domain_entities: buildThreatIndicatorAggregation("dns.question.name", params.timestampField, indicatorLimit),
       url_domain_entities: buildThreatIndicatorAggregation("url.domain", params.timestampField, indicatorLimit),
@@ -769,13 +800,16 @@ export function buildThreatRadarBody(params: { timestampField: string; from: str
         aggregation,
         buildThreatIdentityAggregation(field, params.timestampField, indicatorLimit)
       ])),
-      security_signals: buildSecuritySignalAggregation(entityLimit, indicatorLimit)
+      security_signals: buildSecuritySignalAggregation(entityLimit, indicatorLimit, policy)
     }
   };
 }
 
-export function buildThreatRadarStageBodies(params: { timestampField: string; from: string; to: string; size: number }): ThreatRadarSearchStage[] {
-  const fullBody = buildThreatRadarBody(params);
+export function buildThreatRadarStageBodies(
+  params: { timestampField: string; from: string; to: string; size: number },
+  policy?: Pick<ThreatRadarAgentConfig, "signalRules" | "riskyPorts">
+): ThreatRadarSearchStage[] {
+  const fullBody = buildThreatRadarBody(params, policy);
   const aggregations = asRecord(fullBody.aggs);
   const allEvidenceFields = [
     "source.ip",
@@ -808,7 +842,7 @@ export function buildThreatRadarStageBodies(params: { timestampField: string; fr
         .map((name) => [name, aggregations[name]])
     );
     const evidenceFilter = evidenceFilterOverride ?? (signalOnly
-      ? { bool: { should: Object.values(buildThreatSignalFilters()), minimum_should_match: 1 } }
+      ? { bool: { should: Object.values(buildThreatSignalFilters(policy)), minimum_should_match: 1 } }
       : { bool: { should: evidenceFields.map((field) => ({ exists: { field } })), minimum_should_match: 1 } });
     return {
       key,
@@ -849,13 +883,13 @@ export function buildThreatRadarStageBodies(params: { timestampField: string; fr
   const candidateLaneSize = Math.min(80, Math.max(40, params.size * 3));
   const candidateLimit = Math.min(200, Math.max(100, params.size * 8));
   sourceStage.body.aggs = {
-    source_entities: buildThreatEntityCandidateAggregation("source.ip", candidateLaneSize)
+    source_entities: buildThreatEntityCandidateAggregation("source.ip", candidateLaneSize, policy)
   };
   sourceStage.entity = { aggregationName: "source_entities", field: "source.ip", candidateLimit };
 
   const destinationStage = buildStage("destinations", "destination IP activity", ["destination_entities"], ["destination.ip"], false, false, destinationCandidateFilter);
   destinationStage.body.aggs = {
-    destination_entities: buildThreatEntityCandidateAggregation("destination.ip", candidateLaneSize)
+    destination_entities: buildThreatEntityCandidateAggregation("destination.ip", candidateLaneSize, policy)
   };
   destinationStage.entity = { aggregationName: "destination_entities", field: "destination.ip", candidateLimit };
 
@@ -880,7 +914,12 @@ export function buildThreatRadarStageBodies(params: { timestampField: string; fr
   ];
 }
 
-function buildThreatEntityCandidateAggregation(field: string, size: number) {
+function buildThreatEntityCandidateAggregation(
+  field: string,
+  size: number,
+  policy?: Pick<ThreatRadarAgentConfig, "riskyPorts">
+) {
+  const riskyPorts = threatRadarRiskyPorts(policy);
   const terms = () => ({
     terms: {
       field,
@@ -900,7 +939,7 @@ function buildThreatEntityCandidateAggregation(field: string, size: number) {
         filter: {
           bool: {
             filter: [
-              { terms: { "destination.port": RISKY_DESTINATION_PORTS } },
+              { terms: { "destination.port": riskyPorts } },
               buildSuccessfulAuthenticationFilter()
             ]
           }
@@ -908,7 +947,7 @@ function buildThreatEntityCandidateAggregation(field: string, size: number) {
         aggs: { entities: terms() }
       },
       risky_ports: {
-        filter: { terms: { "destination.port": RISKY_DESTINATION_PORTS } },
+        filter: { terms: { "destination.port": riskyPorts } },
         aggs: { entities: terms() }
       },
       volume: terms()
@@ -920,9 +959,10 @@ export function buildThreatRadarEntityDetailBody(
   params: { timestampField: string; from: string; to: string; size: number },
   aggregationName: "source_entities" | "destination_entities",
   entityField: "source.ip" | "destination.ip",
-  candidates: string[]
+  candidates: string[],
+  policy?: Pick<ThreatRadarAgentConfig, "signalRules" | "riskyPorts">
 ): ThreatRadarSearchBody {
-  const fullBody = buildThreatRadarBody(params);
+  const fullBody = buildThreatRadarBody(params, policy);
   const aggregation = asRecord(asRecord(fullBody.aggs)[aggregationName]);
   const aggregationTerms = asRecord(aggregation.terms);
   const detailedAggregation = {
@@ -948,11 +988,6 @@ export function buildThreatRadarEntityDetailBody(
     aggs: { [aggregationName]: detailedAggregation }
   };
 }
-
-const RISKY_DESTINATION_PORTS = [
-  21, 22, 23, 25, 53, 69, 110, 135, 137, 138, 139, 143, 161, 389, 445,
-  1433, 1521, 2049, 3306, 3389, 5432, 5900, 5985, 5986, 6379, 8080, 8443, 9200, 11211, 27017
-];
 
 const THREAT_IDENTITY_FIELDS = [
   { aggregation: "user_id_identities", field: "user.id" },
@@ -1088,7 +1123,14 @@ function buildAuthenticationActivityFilter() {
   };
 }
 
-function buildThreatEntityAggregation(entityField: string, peerField: string, timestampField: string, size: number, excludeKnownResolvers = false) {
+function buildThreatEntityAggregation(
+  entityField: string,
+  peerField: string,
+  timestampField: string,
+  size: number,
+  excludeKnownResolvers = false,
+  policy?: Pick<ThreatRadarAgentConfig, "signalRules" | "riskyPorts">
+) {
   return {
     terms: {
       field: entityField,
@@ -1099,13 +1141,13 @@ function buildThreatEntityAggregation(entityField: string, peerField: string, ti
     },
     aggs: {
       peer_ips: { cardinality: { field: peerField } },
-      ...buildThreatEvidenceAggregations(timestampField),
+      ...buildThreatEvidenceAggregations(timestampField, policy),
       outbound_events: {
         filter: buildPublicIpFilter(peerField, excludeKnownResolvers ? KNOWN_PUBLIC_DNS_IPS : []),
         aggs: {
           peer_values: {
             terms: { field: peerField, size: 5, order: { _count: "desc" } },
-            aggs: buildThreatEvidenceAggregations(timestampField)
+            aggs: buildThreatEvidenceAggregations(timestampField, policy)
           }
         }
       }
@@ -1113,7 +1155,10 @@ function buildThreatEntityAggregation(entityField: string, peerField: string, ti
   };
 }
 
-function buildThreatEvidenceAggregations(timestampField: string) {
+function buildThreatEvidenceAggregations(
+  timestampField: string,
+  policy?: Pick<ThreatRadarAgentConfig, "signalRules">
+) {
   return {
     infrastructure: { cardinality: { field: "data_stream.namespace" } },
     destination_ports: { cardinality: { field: "destination.port" } },
@@ -1128,7 +1173,7 @@ function buildThreatEvidenceAggregations(timestampField: string) {
     network_bytes: { sum: { field: "network.bytes" } },
     threat_signals: {
       filters: {
-        filters: Object.fromEntries(Object.entries(buildThreatSignalFilters()).filter(([key]) => key !== "denied"))
+        filters: Object.fromEntries(Object.entries(buildThreatSignalFilters(policy)).filter(([key]) => key !== "denied"))
       }
     },
     latest: {
@@ -1314,23 +1359,25 @@ function buildTextSignalFilter(query: string, fields = DETECTION_SIGNAL_FIELDS) 
   };
 }
 
-function buildThreatSignalFilters() {
-  return {
-    denied: buildTextSignalFilter("fail* | denied | blocked | drop* | reject* | timeout | refused", ["event.action^4", "event.outcome^4", "event.reason^2", "message"]),
-    brute_force: buildTextSignalFilter('"brute force" | bruteforce | "password spray" | "credential stuffing" | "repeated login" | "authentication attack"'),
-    malware: buildTextSignalFilter('"malware detected" | "malware blocked" | "malicious file" | "malicious payload" | "virus detected" | trojan | ransomware | backdoor | botnet | cryptominer | rootkit | spyware'),
-    command_control: buildTextSignalFilter('"command and control" | "command-and-control" | "c2 traffic" | "c2 communication" | "c2 server" | "dns tunnel" | "dns tunneling" | "malware beacon" | botnet'),
-    exfiltration: buildTextSignalFilter('exfiltration | exfiltrate* | "covert channel" | "data theft" | "unusual upload"'),
-    scanning: buildTextSignalFilter('"port scan" | "network scan" | reconnaissance | enumeration | probing'),
-    exploit: buildTextSignalFilter('"exploit attempt" | "exploit detected" | shellcode | webshell | "remote code execution" | "sql injection" | "command injection"'),
-    phishing: buildTextSignalFilter('"phishing detected" | "phishing domain" | "credential theft" | "credential harvesting"')
-  };
+function buildThreatSignalFilters(policy?: Pick<ThreatRadarAgentConfig, "signalRules">) {
+  const filters = Object.fromEntries(enabledThreatSignalRules(policy).map((rule) => [
+    rule.key,
+    buildTextSignalFilter(
+      rule.query,
+      rule.key === "denied" ? ["event.action^4", "event.outcome^4", "event.reason^2", "message"] : DETECTION_SIGNAL_FIELDS
+    )
+  ]));
+  return Object.keys(filters).length > 0 ? filters : { disabled: { match_none: {} } };
 }
 
-function buildSecuritySignalAggregation(entitySize: number, indicatorSize: number) {
+function buildSecuritySignalAggregation(
+  entitySize: number,
+  indicatorSize: number,
+  policy?: Pick<ThreatRadarAgentConfig, "signalRules">
+) {
   return {
     filters: {
-      filters: buildThreatSignalFilters()
+      filters: buildThreatSignalFilters(policy)
     },
     aggs: {
       source_entities: { terms: { field: "source.ip", size: entitySize } },
@@ -1373,7 +1420,12 @@ function buildPublicIpFilter(field: string, excludedIps: readonly string[] = [])
   };
 }
 
-export function summarizeThreatRadarEntities(raw: unknown, aggregationName: string, role: ThreatRadarRole): ThreatRadarFinding[] {
+export function summarizeThreatRadarEntities(
+  raw: unknown,
+  aggregationName: string,
+  role: ThreatRadarRole,
+  riskyPorts = threatRadarRiskyPorts()
+): ThreatRadarFinding[] {
   const aggregations = asRecord(asRecord(raw).aggregations);
   const group = asRecord(aggregations[aggregationName]);
   const buckets = Array.isArray(group.buckets) ? group.buckets : [];
@@ -1395,7 +1447,7 @@ export function summarizeThreatRadarEntities(raw: unknown, aggregationName: stri
                 doc_count: readNumber(peerBucket.doc_count),
                 peer_values: { buckets: [{ key: peerIp, doc_count: readNumber(peerBucket.doc_count) }] }
               }
-            }, role, {}, "source_destination");
+            }, role, {}, "source_destination", riskyPorts);
           });
         }
       }
@@ -1403,7 +1455,8 @@ export function summarizeThreatRadarEntities(raw: unknown, aggregationName: stri
         record,
         role,
         readThreatSignalCounts(raw, aggregationName, ip),
-        "entity"
+        "entity",
+        riskyPorts
       )];
     })
     .filter((item) => item.ip !== "--")
@@ -1602,6 +1655,37 @@ function severityForScore(score: number): ThreatRadarSeverity {
   return score >= 80 ? "critical" : score >= 55 ? "high" : score >= 25 ? "medium" : "low";
 }
 
+function applyThreatRadarCardRule<T extends { score: number }>(
+  findings: T[],
+  config: Pick<ThreatRadarAgentConfig, "cardRules">,
+  cardId: ThreatRadarCardId,
+  size: number
+): T[] {
+  const rule = getThreatRadarCardRule(config, cardId);
+  if (!rule.enabled) return [];
+  return findings
+    .filter((finding) => finding.score >= rule.minScore)
+    .filter((finding) => matchesThreatRadarCardQuery(finding, rule.query))
+    .slice(0, size);
+}
+
+export function matchesThreatRadarCardQuery(value: unknown, query: string): boolean {
+  const clauses = query
+    .split("|")
+    .map((clause) => clause.trim())
+    .filter(Boolean)
+    .map((clause) => ({
+      excluded: clause.startsWith("!"),
+      term: clause.replace(/^!/, "").replace(/^['\"]|['\"]$/g, "").replace(/\*/g, "").trim().toLowerCase()
+    }))
+    .filter((clause) => clause.term.length > 0);
+  if (clauses.length === 0) return true;
+  const evidence = JSON.stringify(value).toLowerCase();
+  if (clauses.some((clause) => clause.excluded && evidence.includes(clause.term))) return false;
+  const included = clauses.filter((clause) => !clause.excluded);
+  return included.length === 0 || included.some((clause) => evidence.includes(clause.term));
+}
+
 function rankThreatRadarFindings<T extends ThreatRadarFinding>(findings: T[], size: number): T[] {
   const byIp = new Map<string, T>();
   for (const finding of findings) {
@@ -1628,7 +1712,8 @@ function summarizeThreatEntityBucket(
   bucket: Record<string, unknown>,
   role: ThreatRadarRole,
   signalCounts: Record<string, number>,
-  evidenceScope: ThreatRadarFinding["evidenceScope"]
+  evidenceScope: ThreatRadarFinding["evidenceScope"],
+  riskyPorts: number[]
 ): ThreatRadarFinding {
   const ip = typeof bucket.key === "string" ? bucket.key : String(bucket.key ?? "--");
   const latestHit = readLatestHit(bucket);
@@ -1647,7 +1732,7 @@ function summarizeThreatEntityBucket(
   const outcomes = readBuckets(asRecord(bucket.outcomes).buckets);
   const categories = readBuckets(asRecord(bucket.categories).buckets);
   const datasets = readBuckets(asRecord(bucket.datasets).buckets);
-  const dangerousPorts = ports.filter((port) => RISKY_DESTINATION_PORTS.includes(port));
+  const dangerousPorts = ports.filter((port) => riskyPorts.includes(port));
   const localSignalCounts = readLocalThreatSignalCounts(bucket);
   const combinedSignalCounts = Object.fromEntries(
     [...new Set([...Object.keys(signalCounts), ...Object.keys(localSignalCounts)])]
@@ -2243,11 +2328,6 @@ export function classifyGtiReputation(gti: GtiIpReputation): "Malicious" | "Susp
   const verdict = gti.verdict ?? "";
   const severity = gti.severity ?? "";
   if (/malicious/i.test(verdict) || gti.malicious >= 3 || /critical|high/i.test(severity) || gti.threatScore >= 70) return "Malicious";
-  const explicitlyBenign = /benign|undetected|harmless/i.test(verdict)
-    && gti.malicious < 3
-    && gti.threatScore < 20
-    && gti.reputation >= 0;
-  if (explicitlyBenign) return "Clean";
   if (/suspicious/i.test(verdict)
     || gti.malicious > 0
     || gti.suspicious > 0

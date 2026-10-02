@@ -38,26 +38,26 @@ function mockServerPage(versions: string[]) {
 
 describe("server-hosted bridge discovery", () => {
   it("uses the relay-reported extension ID instead of a local development ID", async () => {
-    mockServerPage(["0.12.4", "0.12.5"]);
+    mockServerPage(["0.12.5", "0.13.0"]);
     expect(getExtensionId()).toBeUndefined();
-    expect(await detectBridgeExtension(100, "0.12.5")).toMatchObject({
+    expect(await detectBridgeExtension(100, "0.13.0")).toMatchObject({
       installed: true,
       extensionId: "abcdefghijklmnopabcdefghijklmnop",
-      extensionVersion: "0.12.5",
+      extensionVersion: "0.13.0",
       transport: "page-relay"
     });
   });
 
   it("keeps the installation gate locked when no extension responds", async () => {
     mockServerPage([]);
-    expect(await detectBridgeExtension(10, "0.12.5")).toMatchObject({ installed: false });
+    expect(await detectBridgeExtension(10, "0.13.0")).toMatchObject({ installed: false });
   });
 
   it("identifies an outdated bridge instead of accepting it", async () => {
-    mockServerPage(["0.12.4"]);
-    expect(await detectBridgeExtension(10, "0.12.5")).toMatchObject({
+    mockServerPage(["0.12.5"]);
+    expect(await detectBridgeExtension(10, "0.13.0")).toMatchObject({
       installed: false,
-      reason: expect.stringContaining("Bridge v0.12.4 is installed")
+      reason: expect.stringContaining("Bridge v0.12.5 is installed")
     });
   });
 });

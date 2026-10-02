@@ -4,6 +4,10 @@ dist/
 .env.local
 *.log
 coverage/
+.data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
 .vite/
 *.tsbuildinfo
 apps/web/public/downloads/*.zip

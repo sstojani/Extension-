@@ -11,6 +11,7 @@ WorkingDirectory=/opt/soc-watch
 Environment=NODE_ENV=production
 Environment=SOC_WATCH_HOST=127.0.0.1
 Environment=SOC_WATCH_PORT=8080
+EnvironmentFile=-/etc/soc-watch/agent.env
 ExecStart=/usr/bin/node /opt/soc-watch/scripts/serve-web.mjs
 Restart=on-failure
 RestartSec=5
@@ -18,6 +19,10 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
+StateDirectory=soc-watch
+ReadWritePaths=/var/lib/soc-watch
+UMask=0077
+TimeoutStopSec=180
 
 [Install]
 WantedBy=multi-user.target

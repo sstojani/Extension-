@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_THREAT_RADAR_CARD_RULES,
+  DEFAULT_THREAT_RADAR_RISKY_PORTS,
+  DEFAULT_THREAT_RADAR_SIGNAL_RULES,
+  threatRadarAgentConfigSchema,
   isAllowedOrigin,
   kibanaApiPath,
   parseBridgeRequest,
@@ -37,6 +41,31 @@ describe("protocol validation", () => {
       batchOffset: 0
     });
     expect(dailyIocHuntParamsSchema.parse({ indexPattern: "logs-*", maxIocs: 500, batchOffset: 500 }).batchOffset).toBe(500);
+  });
+
+  it("accepts the persisted-finding clear action", () => {
+    expect(parseBridgeRequest({
+      version: 1,
+      requestId: "12345678",
+      action: "threatRadar.agent.clear",
+      params: {}
+    }).action).toBe("threatRadar.agent.clear");
+  });
+
+  it("adds the complete detection policy to older agent configurations", () => {
+    const config = threatRadarAgentConfigSchema.parse({
+      enabled: true,
+      intervalMinutes: 15,
+      indexPattern: "logs-*",
+      timestampField: "@timestamp",
+      candidateExclusions: [],
+      candidateExceptions: []
+    });
+
+    expect(config.historyRetentionHours).toBe(24);
+    expect(config.riskyPorts).toEqual(DEFAULT_THREAT_RADAR_RISKY_PORTS);
+    expect(config.signalRules).toEqual(DEFAULT_THREAT_RADAR_SIGNAL_RULES);
+    expect(config.cardRules).toEqual(DEFAULT_THREAT_RADAR_CARD_RULES);
   });
 });
 

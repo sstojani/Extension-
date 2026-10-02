@@ -17,6 +17,7 @@ export const bridgeActions = [
   "threatRadar.analyze",
   "threatRadar.agent.configure",
   "threatRadar.agent.run",
+  "threatRadar.agent.clear",
   "alerts.get",
   "alerts.configure",
   "alerts.rule.add",
@@ -116,6 +117,73 @@ export interface IOCFieldMapping {
   sha1: string[];
   sha256: string[];
 }
+
+export const threatRadarSignalKeys = [
+  "denied",
+  "brute_force",
+  "malware",
+  "command_control",
+  "exfiltration",
+  "scanning",
+  "exploit",
+  "phishing"
+] as const;
+
+export type ThreatRadarSignalKey = (typeof threatRadarSignalKeys)[number];
+
+export type ThreatRadarSignalRule = {
+  key: ThreatRadarSignalKey;
+  enabled: boolean;
+  query: string;
+};
+
+export const threatRadarCardIds = [
+  "identity",
+  "sources",
+  "destinations",
+  "outbound",
+  "denied",
+  "ports",
+  "indicators",
+  "review"
+] as const;
+
+export type ThreatRadarCardId = (typeof threatRadarCardIds)[number];
+
+export type ThreatRadarCardRule = {
+  id: ThreatRadarCardId;
+  enabled: boolean;
+  minScore: number;
+  query: string;
+};
+
+export const DEFAULT_THREAT_RADAR_SIGNAL_RULES: ThreatRadarSignalRule[] = [
+  { key: "denied", enabled: true, query: "fail* | denied | blocked | drop* | reject* | timeout | refused" },
+  { key: "brute_force", enabled: true, query: "\"brute force\" | bruteforce | \"password spray\" | \"credential stuffing\" | \"repeated login\" | \"authentication attack\"" },
+  { key: "malware", enabled: true, query: "\"malware detected\" | \"malware blocked\" | \"malicious file\" | \"malicious payload\" | \"virus detected\" | trojan | ransomware | backdoor | botnet | cryptominer | rootkit | spyware" },
+  { key: "command_control", enabled: true, query: "\"command and control\" | \"command-and-control\" | \"c2 traffic\" | \"c2 communication\" | \"c2 server\" | \"dns tunnel\" | \"dns tunneling\" | \"malware beacon\" | botnet" },
+  { key: "exfiltration", enabled: true, query: "exfiltration | exfiltrate* | \"covert channel\" | \"data theft\" | \"unusual upload\"" },
+  { key: "scanning", enabled: true, query: "\"port scan\" | \"network scan\" | reconnaissance | enumeration | probing" },
+  { key: "exploit", enabled: true, query: "\"exploit attempt\" | \"exploit detected\" | shellcode | webshell | \"remote code execution\" | \"sql injection\" | \"command injection\"" },
+  { key: "phishing", enabled: true, query: "\"phishing detected\" | \"phishing domain\" | \"credential theft\" | \"credential harvesting\"" }
+];
+
+export const DEFAULT_THREAT_RADAR_CARD_RULES: ThreatRadarCardRule[] = [
+  { id: "identity", enabled: true, minScore: 65, query: "" },
+  { id: "sources", enabled: true, minScore: 25, query: "" },
+  { id: "destinations", enabled: true, minScore: 25, query: "" },
+  { id: "outbound", enabled: true, minScore: 25, query: "" },
+  { id: "denied", enabled: true, minScore: 25, query: "" },
+  { id: "ports", enabled: true, minScore: 25, query: "" },
+  { id: "indicators", enabled: true, minScore: 25, query: "" },
+  { id: "review", enabled: true, minScore: 20, query: "" }
+];
+
+export const DEFAULT_THREAT_RADAR_RISKY_PORTS = [
+  21, 22, 23, 25, 53, 69, 110, 135, 137, 138, 139, 143, 161, 389, 445,
+  1433, 1521, 2049, 3306, 3389, 5432, 5900, 5985, 5986, 6379, 8080, 8443,
+  9200, 11211, 27017
+];
 
 export interface FleetSummary {
   online: number;
@@ -257,9 +325,22 @@ export const threatRadarAnalyzeParamsSchema = z
 export const threatRadarAgentConfigSchema = z
   .object({
     enabled: z.boolean().default(true),
-    intervalMinutes: z.number().int().min(5).max(60).default(15),
+    intervalMinutes: z.number().int().min(5).max(60).default(5),
     indexPattern: z.string().min(1).max(512).default("logs-*"),
     timestampField: z.string().min(1).max(256).default("@timestamp"),
+    historyRetentionHours: z.number().int().min(1).max(168).default(24),
+    riskyPorts: z.array(z.number().int().min(1).max(65535)).max(128).default(DEFAULT_THREAT_RADAR_RISKY_PORTS),
+    signalRules: z.array(z.object({
+      key: z.enum(threatRadarSignalKeys),
+      enabled: z.boolean().default(true),
+      query: z.string().trim().min(1).max(2000)
+    }).strict()).max(16).default(DEFAULT_THREAT_RADAR_SIGNAL_RULES),
+    cardRules: z.array(z.object({
+      id: z.enum(threatRadarCardIds),
+      enabled: z.boolean().default(true),
+      minScore: z.number().int().min(0).max(200),
+      query: z.string().trim().max(2000).default("")
+    }).strict()).max(16).default(DEFAULT_THREAT_RADAR_CARD_RULES),
     candidateExclusions: z.array(z.string().trim().min(1).max(256)).max(200).default([]),
     candidateExceptions: z.array(z.object({
       id: z.string().min(1).max(128),
@@ -273,6 +354,8 @@ export const threatRadarAgentConfigSchema = z
     }).strict()).max(500).default([])
   })
   .strict();
+
+export type ThreatRadarAgentConfig = z.infer<typeof threatRadarAgentConfigSchema>;
 
 export function ok<T>(requestId: string, data: T, durationMs?: number): BridgeSuccess<T> {
   return withOptional({ version: BRIDGE_VERSION, requestId, success: true, data }, "durationMs", durationMs);

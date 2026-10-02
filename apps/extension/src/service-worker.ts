@@ -7,7 +7,8 @@ import {
   parseBridgeRequest,
   threatRadarAgentConfigSchema,
   type BridgeRequest,
-  type BridgeResponse
+  type BridgeResponse,
+  type ThreatRadarAgentConfig
 } from "@soc-watch/protocol";
 import { DEFAULT_ALLOWED_ORIGINS } from "./config";
 import {
@@ -29,9 +30,10 @@ import {
   type ThreatRadarFinding,
   type ThreatRadarIdentityAnomaly
 } from "./kibana";
-import { collectDailyThreatIntel, type ThreatIntelIOC } from "./threat-intel";
+import type { ThreatIntelIOC } from "./threat-intel";
+import { runHuntCampaignBatch } from "./hunt-campaign";
 import { isExcludedCandidate, type CandidateException } from "./candidate-exclusions";
-import { mergeFindingHistory, THREAT_RADAR_HISTORY_RETENTION_MS } from "./threat-radar-history";
+import { mergeFindingHistory } from "./threat-radar-history";
 import { classifyIdentityValue } from "./identity-analysis";
 import { DETECTION_PACK_VERSION, type DetectionCoverageRow } from "./detection-packs";
 import { suppressesAutomaticAlert, type ThreatFeedbackDisposition, type ThreatFeedbackRecord, type ThreatFeedbackTarget } from "./threat-feedback";
@@ -44,6 +46,7 @@ import {
   type ThreatAlertRule
 } from "./threat-alerts";
 import { deriveConnectionHealth, type ConnectionState } from "./connection-health";
+import { normalizeThreatRadarAgentConfig } from "./threat-radar-policy";
 
 const THREAT_RADAR_AGENT_ALARM = "soc-watch-threat-radar-agent";
 const CONNECTION_HEALTH_ALARM = "soc-watch-connection-health";
@@ -57,15 +60,6 @@ const THREAT_ALERT_HISTORY_KEY = "threatAlertHistory";
 const THREAT_ALERT_BROWSER_DIAGNOSTICS_KEY = "threatAlertBrowserDiagnostics";
 const THREAT_ALERT_NOTIFICATION_ICON = "icon-128.png";
 const CHROME_NOTIFICATION_API_TIMEOUT_MS = 5000;
-
-type ThreatRadarAgentConfig = {
-  enabled: boolean;
-  intervalMinutes: number;
-  indexPattern: string;
-  timestampField: string;
-  candidateExclusions: string[];
-  candidateExceptions: CandidateException[];
-};
 
 type ThreatRadarScanRun = {
   id: string;
@@ -111,6 +105,7 @@ type ThreatRadarAgentReport = {
   suspiciousDestinations: ThreatRadarAgentFinding[];
   suspiciousOutbound: ThreatRadarAgentFinding[];
   deniedActivity: ThreatRadarAgentFinding[];
+  riskyPortActivity?: ThreatRadarAgentFinding[];
   identityAnomalies?: ThreatRadarAgentIdentity[];
   reviewCandidates?: ThreatRadarAgentFinding[];
   suspiciousIndicators?: Array<{
@@ -195,7 +190,7 @@ type ThreatAlertHistoryItem = ThreatAlertCandidate & {
   delivery: ThreatAlertDelivery;
 };
 
-const THREAT_RADAR_HISTORY_VERSION = 10;
+const THREAT_RADAR_HISTORY_VERSION = 11;
 const THREAT_RADAR_SCAN_HISTORY_KEY = "threatRadarScanHistory";
 const THREAT_RADAR_FEEDBACK_KEY = "threatRadarFeedbackV1";
 const THREAT_RADAR_CASES_KEY = "threatRadarCasesV1";
@@ -517,6 +512,8 @@ async function dispatch(request: BridgeRequest): Promise<unknown> {
       return configureThreatRadarAgent(request.params);
     case "threatRadar.agent.run":
       return runThreatRadarAgent();
+    case "threatRadar.agent.clear":
+      return clearThreatRadarFindings();
     case "alerts.get":
       return getThreatAlerts();
     case "alerts.configure":
@@ -600,14 +597,7 @@ async function saveBridgeConfig(params: unknown): Promise<unknown> {
 
 function readThreatRadarAgentConfig(value: unknown): ThreatRadarAgentConfig {
   const parsed = threatRadarAgentConfigSchema.safeParse(value);
-  return parsed.success ? parsed.data : {
-    enabled: true,
-    intervalMinutes: 15,
-    indexPattern: "logs-*",
-    timestampField: "@timestamp",
-    candidateExclusions: [],
-    candidateExceptions: []
-  };
+  return normalizeThreatRadarAgentConfig(parsed.success ? parsed.data : {});
 }
 
 async function getThreatRadarAgentConfig(): Promise<ThreatRadarAgentConfig> {
@@ -623,7 +613,7 @@ async function ensureThreatRadarAgentSchedule(): Promise<void> {
 }
 
 async function configureThreatRadarAgent(params: unknown): Promise<unknown> {
-  const config = threatRadarAgentConfigSchema.parse(params);
+  const config = normalizeThreatRadarAgentConfig(threatRadarAgentConfigSchema.parse(params));
   const stored = await chrome.storage.local.get(THREAT_RADAR_AGENT_STATE_KEY);
   const state = filterThreatRadarAgentState(
     asRecord(stored[THREAT_RADAR_AGENT_STATE_KEY]),
@@ -636,6 +626,20 @@ async function configureThreatRadarAgent(params: unknown): Promise<unknown> {
   });
   await ensureThreatRadarAgentSchedule();
   return { config, state };
+}
+
+async function clearThreatRadarFindings(): Promise<unknown> {
+  const stored = await chrome.storage.local.get(THREAT_RADAR_AGENT_STATE_KEY);
+  const current = asRecord(stored[THREAT_RADAR_AGENT_STATE_KEY]);
+  const { report: _report, ...stateWithoutReport } = current;
+  const state = {
+    ...stateWithoutReport,
+    candidates: 0,
+    alertsCreated: 0,
+    clearedAt: new Date().toISOString()
+  };
+  await chrome.storage.local.set({ [THREAT_RADAR_AGENT_STATE_KEY]: state });
+  return { config: await getThreatRadarAgentConfig(), state };
 }
 
 function filterThreatRadarAgentState(state: Record<string, unknown>, exclusions: string[], exceptions: CandidateException[]): Record<string, unknown> {
@@ -716,6 +720,7 @@ function filterThreatRadarReport(report: ThreatRadarAgentReport, exclusions: str
     suspiciousDestinations: filterFindings(report.suspiciousDestinations),
     suspiciousOutbound: filterFindings(report.suspiciousOutbound),
     deniedActivity: filterFindings(report.deniedActivity),
+    riskyPortActivity: filterFindings(report.riskyPortActivity),
     identityAnomalies,
     reviewCandidates: filterFindings(report.reviewCandidates),
     suspiciousIndicators,
@@ -857,7 +862,7 @@ async function runThreatRadarAgent(): Promise<unknown> {
     }) as ThreatRadarAgentReport;
     if (currentReport.analysis) currentReport = { ...currentReport, analysis: { ...currentReport.analysis, scanId, scanMode: "automatic" } };
     const alertResult = await processThreatRadarAlerts(currentReport);
-    const mergedReport = mergeThreatRadarReportHistory(currentReport, previousReport);
+    const mergedReport = mergeThreatRadarReportHistory(currentReport, previousReport, config.historyRetentionHours);
     const report = await backfillThreatRadarReportReputation(mergedReport);
     const completedAt = new Date().toISOString();
     const partial = report.analysis?.partial === true || report.analysis?.dataHealth?.status !== "healthy";
@@ -916,11 +921,16 @@ async function runThreatRadarAgent(): Promise<unknown> {
   }
 }
 
-function mergeThreatRadarReportHistory(current: ThreatRadarAgentReport, previous: ThreatRadarAgentReport): ThreatRadarAgentReport {
+function mergeThreatRadarReportHistory(
+  current: ThreatRadarAgentReport,
+  previous: ThreatRadarAgentReport,
+  retentionHours: number
+): ThreatRadarAgentReport {
   const observedAt = current.analyzedAt || new Date().toISOString();
+  const retentionMs = retentionHours * 60 * 60 * 1000;
   const compatiblePrevious = previous.historyVersion === THREAT_RADAR_HISTORY_VERSION ? previous : {} as ThreatRadarAgentReport;
   const merge = (currentFindings: ThreatRadarAgentFinding[], previousFindings: ThreatRadarAgentFinding[] | undefined) => (
-    mergeFindingHistory(currentFindings, Array.isArray(previousFindings) ? previousFindings : [], observedAt)
+    mergeFindingHistory(currentFindings, Array.isArray(previousFindings) ? previousFindings : [], observedAt, retentionMs)
   );
   const mergeIdentities = (currentIdentities: ThreatRadarAgentIdentity[], previousIdentities: ThreatRadarAgentIdentity[] | undefined) => {
     const previousByKey = new Map((Array.isArray(previousIdentities) ? previousIdentities : [])
@@ -945,8 +955,8 @@ function mergeThreatRadarReportHistory(current: ThreatRadarAgentReport, previous
     });
     const observedTime = Date.parse(observedAt);
     const cutoff = Number.isFinite(observedTime)
-      ? observedTime - THREAT_RADAR_HISTORY_RETENTION_MS
-      : Date.now() - THREAT_RADAR_HISTORY_RETENTION_MS;
+      ? observedTime - retentionMs
+      : Date.now() - retentionMs;
     const retained = (Array.isArray(previousIdentities) ? previousIdentities : [])
       .filter((identity) => !currentKeys.has(identityHistoryKey(identity)))
       .filter((identity) => {
@@ -969,6 +979,7 @@ function mergeThreatRadarReportHistory(current: ThreatRadarAgentReport, previous
     suspiciousDestinations: merge(current.suspiciousDestinations, compatiblePrevious.suspiciousDestinations),
     suspiciousOutbound: merge(current.suspiciousOutbound, compatiblePrevious.suspiciousOutbound),
     deniedActivity: merge(current.deniedActivity, compatiblePrevious.deniedActivity),
+    riskyPortActivity: merge(current.riskyPortActivity ?? [], compatiblePrevious.riskyPortActivity),
     identityAnomalies,
     reviewCandidates: merge(current.reviewCandidates ?? [], compatiblePrevious.reviewCandidates),
     summary: {
@@ -1023,6 +1034,7 @@ async function backfillThreatRadarReportReputation(report: ThreatRadarAgentRepor
     suspiciousDestinations: replace(report.suspiciousDestinations),
     suspiciousOutbound: replace(report.suspiciousOutbound),
     deniedActivity: replace(report.deniedActivity),
+    riskyPortActivity: replace(report.riskyPortActivity),
     reviewCandidates
   };
   if (report.analysis) updatedReport.analysis = { ...report.analysis, reputation };
@@ -1261,7 +1273,12 @@ async function saveThreatRadarFeedback(params: unknown): Promise<unknown> {
     expiresAt = new Date(expiry).toISOString();
   }
 
-  const stored = await chrome.storage.local.get(THREAT_RADAR_FEEDBACK_KEY);
+  const stored = await chrome.storage.local.get([
+    THREAT_RADAR_FEEDBACK_KEY,
+    THREAT_ALERT_HISTORY_KEY,
+    THREAT_RADAR_AGENT_CONFIG_KEY,
+    THREAT_RADAR_AGENT_STATE_KEY
+  ]);
   const feedback = readThreatRadarFeedback(stored[THREAT_RADAR_FEEDBACK_KEY]);
   const existing = feedback.find((item) => item.targetKind === record.targetKind && item.targetFingerprint === targetFingerprint);
   const next: ThreatFeedbackRecord = {
@@ -1275,8 +1292,79 @@ async function saveThreatRadarFeedback(params: unknown): Promise<unknown> {
   if (typeof record.analyst === "string" && record.analyst.trim()) next.analyst = record.analyst.trim().slice(0, 120);
   if (expiresAt) next.expiresAt = expiresAt;
   const updated = [next, ...feedback.filter((item) => item.id !== existing?.id)].slice(0, 2000);
-  await chrome.storage.local.set({ [THREAT_RADAR_FEEDBACK_KEY]: updated });
-  return { feedback: updated };
+  const learnedException = suppressesAutomaticAlert(next) && next.targetKind === "alert"
+    ? buildLearnedCandidateException(
+        readThreatAlertHistory(stored[THREAT_ALERT_HISTORY_KEY]).find((item) => item.fingerprint === next.targetFingerprint),
+        next
+      )
+    : undefined;
+
+  if (!learnedException) {
+    await chrome.storage.local.set({ [THREAT_RADAR_FEEDBACK_KEY]: updated });
+    return { feedback: updated };
+  }
+
+  const config = readThreatRadarAgentConfig(stored[THREAT_RADAR_AGENT_CONFIG_KEY]);
+  const candidateExceptions = [
+    ...config.candidateExceptions.filter((item) => item.id !== learnedException.id),
+    learnedException
+  ].slice(-500);
+  const learnedConfig = { ...config, candidateExceptions };
+  const state = filterThreatRadarAgentState(
+    asRecord(stored[THREAT_RADAR_AGENT_STATE_KEY]),
+    learnedConfig.candidateExclusions,
+    learnedConfig.candidateExceptions
+  );
+  await chrome.storage.local.set({
+    [THREAT_RADAR_FEEDBACK_KEY]: updated,
+    [THREAT_RADAR_AGENT_CONFIG_KEY]: learnedConfig,
+    [THREAT_RADAR_AGENT_STATE_KEY]: state
+  });
+  return { feedback: updated, learnedException };
+}
+
+function buildLearnedCandidateException(
+  alert: ThreatAlertHistoryItem | undefined,
+  feedback: ThreatFeedbackRecord
+): CandidateException | undefined {
+  if (!alert) return undefined;
+  let scope: CandidateException["scope"];
+  let value = alert.indicator;
+  let field: string | undefined;
+
+  if (alert.indicatorType === "ip") {
+    scope = "ip";
+    if (feedback.disposition === "expected_scanner" && alert.sourceIp) {
+      value = alert.sourceIp;
+      field = "source.ip";
+    } else if (feedback.disposition === "expected_service" && alert.destinationIp) {
+      value = alert.destinationIp;
+      field = "destination.ip";
+    } else if (alert.sourceIp === value) {
+      field = "source.ip";
+    } else if (alert.destinationIp === value) {
+      field = "destination.ip";
+    }
+  } else if (alert.indicatorType === "domain") {
+    scope = "domain";
+  } else if (alert.indicatorType === "hash") {
+    scope = "hash";
+  } else {
+    scope = "identity";
+  }
+
+  const normalized = normalizeAlertIndicator(value);
+  if (!normalized || normalized === "--") return undefined;
+  return {
+    id: `feedback-${feedback.id}`,
+    scope,
+    value: normalized,
+    ...(field ? { field } : {}),
+    reason: `Learned from analyst disposition: ${feedback.disposition.replace(/_/g, " ")}`,
+    ...(feedback.expiresAt ? { expiresAt: feedback.expiresAt } : {}),
+    enabled: true,
+    createdAt: feedback.createdAt
+  };
 }
 
 function isThreatFeedbackTarget(value: unknown): value is ThreatFeedbackTarget {
@@ -1430,12 +1518,16 @@ function isThreatCaseStatus(value: unknown): value is ThreatCaseStatus {
 }
 
 async function processThreatRadarAlerts(report: ThreatRadarAgentReport): Promise<{ candidates: number; alertsCreated: number; notificationsSent: number; notificationsFailed: number; suppressed: number }> {
-  const stored = await chrome.storage.local.get([THREAT_ALERT_CONFIG_KEY, THREAT_ALERT_RULES_KEY, THREAT_ALERT_HISTORY_KEY, THREAT_RADAR_AGENT_ALERTS_KEY, THREAT_RADAR_FEEDBACK_KEY]);
-  const config = readThreatAlertConfig(stored[THREAT_ALERT_CONFIG_KEY]);
+  const stored = await chrome.storage.local.get(THREAT_ALERT_RULES_KEY);
   const rules = readThreatAlertRules(stored[THREAT_ALERT_RULES_KEY]);
+  return processThreatAlertCandidates(buildThreatAlertCandidates(report, rules));
+}
+
+async function processThreatAlertCandidates(rawCandidates: ThreatAlertCandidate[]): Promise<{ candidates: number; alertsCreated: number; notificationsSent: number; notificationsFailed: number; suppressed: number }> {
+  const stored = await chrome.storage.local.get([THREAT_ALERT_CONFIG_KEY, THREAT_ALERT_HISTORY_KEY, THREAT_RADAR_AGENT_ALERTS_KEY, THREAT_RADAR_FEEDBACK_KEY]);
+  const config = readThreatAlertConfig(stored[THREAT_ALERT_CONFIG_KEY]);
   const history = readThreatAlertHistory(stored[THREAT_ALERT_HISTORY_KEY]);
   const cooldowns = asRecord(stored[THREAT_RADAR_AGENT_ALERTS_KEY]);
-  const rawCandidates = buildThreatAlertCandidates(report, rules);
   const feedback = readThreatRadarFeedback(stored[THREAT_RADAR_FEEDBACK_KEY]);
   const candidates = rawCandidates.filter((candidate) => !feedback.some((item) => item.targetFingerprint === candidate.fingerprint && suppressesAutomaticAlert(item)));
   const now = Date.now();
@@ -1818,48 +1910,61 @@ function isTelegramToken(value: string): boolean {
 async function runDailyIocHunt(params: unknown): Promise<unknown> {
   const parsed = dailyIocHuntParamsSchema.parse(params);
   const startedAt = new Date().toISOString();
-  const collection = await collectDailyThreatIntel(parsed.maxIocs, parsed.batchOffset);
   const agentConfig = await getThreatRadarAgentConfig();
-  const iocs = collection.iocs.filter((ioc) => !isExcludedCandidate({
-    type: ioc.type,
-    normalized: ioc.normalized,
-    values: [ioc.malware ?? "", ioc.threatType ?? "", ...ioc.sources]
-  }, agentConfig.candidateExclusions, agentConfig.candidateExceptions));
-  let results;
-  try {
-    const raw = await searchIOCBatch({
-      iocs,
-      indexPattern: parsed.indexPattern,
-      timestampField: parsed.timestampField,
-      from: parsed.from,
-      to: parsed.to,
-      size: parsed.size
-    });
-    const buckets = asRecord(asRecord(asRecord(raw).aggregations).ioc_matches).buckets;
-    const bucketMap = asRecord(buckets);
-    results = iocs.map((ioc, index) => {
-      const bucket = asRecord(bucketMap[`ioc_${index}`]);
-      const total = readNumber(bucket.doc_count);
-      return {
-        ioc,
-        total,
-        hits: summarizeBulkHits(bucket),
-        matched: total > 0
-      };
-    });
-  } catch (error) {
-    results = iocs.map((ioc) => ({
-      ioc,
-      total: 0,
-      hits: [],
-      matched: false,
-      error: error instanceof Error ? error.message : "IOC hunt search failed."
-    }));
-  }
+  const collection = await runHuntCampaignBatch(parsed, {
+    include: (ioc) => !isExcludedCandidate({
+      type: ioc.type,
+      normalized: ioc.normalized,
+      values: [ioc.malware ?? "", ioc.threatType ?? "", ...ioc.sources]
+    }, agentConfig.candidateExclusions, agentConfig.candidateExceptions),
+    query: async (iocs) => {
+      const raw = asRecord(await searchIOCBatch({
+        iocs,
+        indexPattern: parsed.indexPattern,
+        timestampField: parsed.timestampField,
+        from: parsed.from,
+        to: parsed.to,
+        size: parsed.size
+      }));
+      if (raw.error || raw.timed_out === true || readNumber(asRecord(raw._shards).failed) > 0) {
+        throw new Error("IOC hunt search failed or returned partial results. Retry this batch.");
+      }
+      const bucketMap = asRecord(asRecord(asRecord(raw.aggregations).ioc_matches).buckets);
+      return iocs.map((ioc, index) => {
+        const bucket = asRecord(bucketMap[`ioc_${index}`]);
+        const total = bucket.doc_count;
+        if (typeof total !== "number" || !Number.isSafeInteger(total) || total < 0) {
+          throw new Error("IOC hunt search returned an incomplete batch. Retry this batch.");
+        }
+        return {
+          ioc,
+          total,
+          hits: summarizeBulkHits(bucket),
+          matched: total > 0
+        };
+      });
+    }
+  });
+  const results = collection.error === undefined ? collection.results : collection.iocs.map((ioc) => ({
+    ioc,
+    total: 0,
+    hits: [],
+    matched: false,
+    error: collection.error
+  }));
 
   const matchedResults = results.filter((result) => result.total > 0);
+  let alertResult = { alertsCreated: 0, notificationsSent: 0, notificationsFailed: 0 };
+  let alertError: string | undefined;
+  try {
+    if (matchedResults.length > 0) {
+      alertResult = await processThreatAlertCandidates(buildIocHuntAlertCandidates(matchedResults));
+    }
+  } catch (error) {
+    alertError = error instanceof Error ? error.message : "IOC hunt alert processing failed.";
+  }
   const providers = collection.providers.map((provider) => {
-    const providerResults = results.filter((result) => result.ioc.sources.includes(provider.name));
+    const providerResults = collection.error === undefined ? results.filter((result) => result.ioc.sources.includes(provider.name)) : [];
     const providerMatches = providerResults.filter((result) => result.total > 0);
     return {
       ...provider,
@@ -1872,19 +1977,62 @@ async function runDailyIocHunt(params: unknown): Promise<unknown> {
   return {
     startedAt,
     completedAt: new Date().toISOString(),
-    batchNumber: Math.floor(collection.batchOffset / parsed.maxIocs) + 1,
+    campaignId: collection.campaignId,
+    createdAt: collection.createdAt,
+    expiresAt: collection.expiresAt,
+    stats: collection.stats,
+    progress: collection.progress,
+    retryBatchOffset: collection.retryBatchOffset,
+    ...(collection.error !== undefined ? { error: collection.error } : {}),
+    ...(alertError !== undefined ? { alertError } : {}),
+    batchNumber: collection.batchNumber,
     batchOffset: collection.batchOffset,
     batchSize: collection.batchSize,
     totalAvailable: collection.totalAvailable,
-    nextBatchOffset: collection.batchOffset + collection.batchSize,
+    nextBatchOffset: collection.nextBatchOffset,
     hasMore: collection.hasMore,
     providers,
     collected: collection.iocs.length,
-    hunted: results.length,
+    hunted: collection.error === undefined ? results.length : 0,
     matched: matchedResults.length,
     siemEvents: matchedResults.reduce((sum, result) => sum + result.total, 0),
+    alertsCreated: alertResult.alertsCreated,
+    notificationsSent: alertResult.notificationsSent,
+    notificationsFailed: alertResult.notificationsFailed,
     results
   };
+}
+
+function buildIocHuntAlertCandidates(results: Array<{ ioc: ThreatIntelIOC; total: number; hits: ReturnType<typeof summarizeBulkHits> }>): ThreatAlertCandidate[] {
+  return results.flatMap((result) => {
+    const indicatorType: AlertIndicatorType | undefined = result.ioc.type === "ip"
+      ? "ip"
+      : result.ioc.type === "domain"
+        ? "domain"
+        : ["md5", "sha1", "sha256"].includes(result.ioc.type) ? "hash" : undefined;
+    if (!indicatorType || result.ioc.riskScore < 60) return [];
+    const firstHit = result.hits[0];
+    const score = Math.min(200, result.ioc.riskScore + Math.min(30, Math.ceil(Math.log10(result.total + 1) * 10)));
+    return [{
+      fingerprint: `ioc_hunt_match|${indicatorType}|${normalizeAlertIndicator(result.ioc.normalized)}`,
+      title: "High-priority threat-intel match",
+      category: "ioc_hunt_match",
+      severity: result.ioc.riskScore >= 80 || result.total >= 100 ? "critical" : "high",
+      indicatorType,
+      indicator: result.ioc.normalized,
+      ...(firstHit?.sourceIp ? { sourceIp: firstHit.sourceIp } : {}),
+      ...(firstHit?.destinationIp ? { destinationIp: firstHit.destinationIp } : {}),
+      score,
+      events: result.total,
+      reasons: [
+        `Matched ${result.total.toLocaleString()} SIEM event${result.total === 1 ? "" : "s"}`,
+        ...result.ioc.riskReasons,
+        `Sources: ${result.ioc.sources.join(", ")}`
+      ].slice(0, 6),
+      ruleIds: [],
+      ruleNames: []
+    } satisfies ThreatAlertCandidate];
+  });
 }
 
 function countResultsByType(results: Array<{ ioc: ThreatIntelIOC }>): Record<string, number> {

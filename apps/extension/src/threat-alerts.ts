@@ -63,7 +63,7 @@ export type AlertableIdentity = {
 export type ThreatAlertCandidate = {
   fingerprint: string;
   title: string;
-  category: "watched_ioc" | "access_risk" | "outbound_risk" | "malicious_indicator" | "identity_risk";
+  category: "watched_ioc" | "access_risk" | "outbound_risk" | "malicious_indicator" | "identity_risk" | "ioc_hunt_match";
   severity: "critical" | "high";
   indicatorType: AlertIndicatorType;
   indicator: string;

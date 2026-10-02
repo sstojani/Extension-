@@ -1,6 +1,6 @@
 {
   "name": "soc-watch",
-  "version": "0.12.5",
+  "version": "0.14.0",
   "private": true,
   "description": "SOC Watch internal ELK monitoring, threat hunting, and fleet health platform.",
   "type": "module",
@@ -13,6 +13,7 @@
     "package:extension": "node scripts/package-extension.mjs",
     "dev:all": "node scripts/dev-all.mjs",
     "start:web": "node scripts/serve-web.mjs",
+    "evaluate": "npm run evaluate -w apps/server",
     "lint": "npm run lint --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"

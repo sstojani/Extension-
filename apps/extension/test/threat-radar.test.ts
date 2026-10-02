@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildThreatRadarBody, buildThreatRadarEntityDetailBody, buildThreatRadarStageBodies, calculateGtiBoost, classifyGtiReputation, isConfirmedSuspiciousFinding, isConfirmedSuspiciousIndicator, isInvestigationCandidate, parseGtiReputationResponse, summarizeThreatRadarEntities, summarizeThreatRadarIndicators, type GtiIpReputation, type ThreatRadarFinding, type ThreatRadarIndicator } from "../src/kibana";
+import { DEFAULT_THREAT_RADAR_SIGNAL_RULES } from "@soc-watch/protocol";
+import { buildThreatRadarBody, buildThreatRadarEntityDetailBody, buildThreatRadarStageBodies, calculateGtiBoost, classifyGtiReputation, isConfirmedSuspiciousFinding, isConfirmedSuspiciousIndicator, isInvestigationCandidate, matchesThreatRadarCardQuery, parseGtiReputationResponse, summarizeThreatRadarEntities, summarizeThreatRadarIndicators, type GtiIpReputation, type ThreatRadarFinding, type ThreatRadarIndicator } from "../src/kibana";
 
 type EnrichedFinding = ThreatRadarFinding & { gti?: GtiIpReputation };
 
@@ -156,6 +157,43 @@ describe("Threat Radar query generation", () => {
     expect(detail.aggs.source_entities).toHaveProperty("aggs.outbound_events.aggs.peer_values.aggs.source_bytes");
     expect(detail.aggs.source_entities).toHaveProperty("aggs.outbound_events.aggs.peer_values.aggs.network_bytes");
     expect(detail.aggs.source_entities).toHaveProperty("terms.size", 2);
+  });
+
+  it("uses operator-configured signal terms and risky ports", () => {
+    const params = {
+      timestampField: "@timestamp",
+      from: "now-15m",
+      to: "now",
+      size: 50
+    };
+    const policy = {
+      riskyPorts: [4444, 65000],
+      signalRules: DEFAULT_THREAT_RADAR_SIGNAL_RULES.map((rule) => rule.key === "exploit"
+        ? { ...rule, query: '"zero-day-probe" | shellcode' }
+        : { ...rule, enabled: false })
+    };
+    const body = buildThreatRadarBody(params, policy);
+    const stages = buildThreatRadarStageBodies(params, policy);
+
+    const serialized = JSON.stringify(body);
+    const staged = JSON.stringify(stages);
+    expect(serialized).toContain("zero-day-probe");
+    expect(staged).toContain("4444");
+    expect(staged).toContain("65000");
+    expect(serialized).not.toContain("command_control");
+  });
+
+  it("applies panel-specific evidence terms with exclusions", () => {
+    const value = finding({
+      actions: [{ key: "ssh_login_failed", count: 45 }],
+      datasets: [{ key: "firewall", count: 45 }],
+      reasons: ["Repeated access attempts"]
+    });
+
+    expect(matchesThreatRadarCardQuery(value, "ssh | rdp")).toBe(true);
+    expect(matchesThreatRadarCardQuery(value, "rdp | telnet")).toBe(false);
+    expect(matchesThreatRadarCardQuery(value, "ssh | !firewall")).toBe(false);
+    expect(matchesThreatRadarCardQuery(value, "")).toBe(true);
   });
 
   it("does not promote ordinary private internal failures by volume alone", () => {
@@ -507,7 +545,7 @@ describe("Threat Radar query generation", () => {
     expect(classifyGtiReputation(gti)).toBe("Malicious");
   });
 
-  it("keeps an explicitly benign GTI verdict clean despite isolated vendor noise", () => {
+  it("shows conflicting vendor evidence instead of silently calling it clean", () => {
     expect(classifyGtiReputation({
       verdict: "VERDICT_BENIGN",
       severity: "SEVERITY_NONE",
@@ -516,7 +554,7 @@ describe("Threat Radar query generation", () => {
       suspicious: 0,
       reputation: 0,
       asn: 15169
-    })).toBe("Clean");
+    })).toBe("Suspicious");
   });
 
   it("does not confirm a clean domain merely because log text carried a threat label", () => {

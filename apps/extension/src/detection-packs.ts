@@ -1,4 +1,4 @@
-export const DETECTION_PACK_VERSION = "2.0.1";
+export const DETECTION_PACK_VERSION = "3.0.0";
 
 export type DetectionCoverageRow = {
   id: string;

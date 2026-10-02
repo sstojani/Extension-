@@ -2,12 +2,13 @@
 
 SOC Watch is an internal cybersecurity console for Elastic/Kibana environments. It is split into a Chrome Manifest V3 bridge extension and a separate web application. The bridge reuses the analyst's already-authenticated Kibana browser session through `fetch(..., { credentials: "include" })` without reading, storing, or forwarding cookies or authentication material.
 
-Current product version: `0.12.5`. The web app verifies the bridge before opening the console, and the sidebar shows both the web and loaded bridge versions so analysts can confirm that Chrome is using the expected build.
+Current product version: `0.14.0`. The Bridge Console verifies the extension; the new Server Agent console (`/#server-agent`) works independently with server-side read-only Elasticsearch credentials. Both display actual coverage/connection state.
 
 ## Workspace
 
 - `apps/extension` - SOC Watch Bridge, a read-only Chrome MV3 extension.
 - `apps/web` - SOC Watch web console.
+- `apps/server` - optional persistent SQLite-backed scanner, investigator and alert delivery worker (Node.js 24 LTS).
 - `packages/protocol` - shared message contracts, runtime schemas, sanitizers, and Kibana route helpers.
 - `packages/ioc` - IOC refanging, normalization, and classification.
 - `packages/health` - health-state evaluation primitives.
@@ -15,7 +16,7 @@ Current product version: `0.12.5`. The web app verifies the bridge before openin
 
 ## Quick Start
 
-Use Node.js 20, 22, or 24 or newer. Node.js 18 is not supported by the patched test toolchain.
+Use Node.js 24 LTS for the complete workspace and persistent server agent. Node.js 18 is not supported by the patched test toolchain.
 
 ```bash
 npm install
@@ -51,6 +52,8 @@ The configured ID is used as a direct-message fallback. The web app normally lea
 
 ## Security Baseline
 
+For browser-independent 24/7 monitoring, follow [Server Agent setup](docs/SERVER-AGENT.md). Hosting the web interface alone does not run continuous analysis. The server agent is opt-in, requires authenticated API access and dedicated read-only Elasticsearch credentials, and keeps integration secrets on the server. Its bounded investigations are evidence correlation, not an external AI model or a guarantee of complete detection.
+
 SOC Watch V1 is read-only. It does not request the Chrome `cookies` permission, does not implement an arbitrary authenticated proxy, and exposes only explicit RPC actions. Fleet responses are sanitized with allowlists before leaving the extension.
 
-Threat Radar adds staged, evidence-backed Elastic analysis, GTI/VT reputation enrichment, field-coverage diagnostics, a 24-hour finding history, versioned detection coverage, structured exceptions, analyst dispositions, local investigation cases, and browser/Discord/Telegram alert delivery. A zero-finding result is accompanied by coverage health so it is not presented as proof that all activity was clean.
+Threat Radar adds staged, evidence-backed Elastic analysis, GTI/VT reputation enrichment, field-coverage diagnostics, configurable live/history views and retention, per-panel thresholds and evidence expressions, editable signal queries and risky ports, structured exceptions, analyst-driven learning, local investigation cases, and browser/Discord/Telegram alert delivery. IOC Hunt risk-ranks deduplicated vendor intelligence before each 500-indicator Elastic batch and can alert on high-priority IP, domain, and hash matches. A zero-finding result is accompanied by coverage health so it is not presented as proof that all activity was clean.

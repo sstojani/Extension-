@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.14.0 - 2026-10-02
+
+- Add an opt-in persistent server agent: SQLite evidence/checkpoints, PIT/search_after continuation, independent watch queries, reputation retry queue and durable server notifications.
+- Add evidence-based ordered authentication, cross-infrastructure scans, intelligence sightings, baseline-dependent beacon/transfer investigation and bounded read-only investigation traces.
+- Add a server console independent of extension installation, policy/allowlist/assets/accounts settings, finding workflows, watch rules, delivery status and explicit browser notification permission.
+- Freeze browser IOC Hunt campaigns so later 500-indicator batches never refetch/reorder the snapshot; add optional server feed campaigns with priority/provenance and safe retries.
+- Separate undetected/unknown reputation from benign guarantees, retain conflicting provider evidence, and add offline evaluation plus deployment/security guidance for Node.js 24 LTS.
+
+## 0.13.0 - 2026-09-30
+
+### Threat Radar control
+
+- Added a persisted Detection Policy editor for every dashboard panel, including enablement, minimum score, optional evidence expressions, signal-family queries, risky destination ports, and finding retention.
+- Made active findings the default view, added an explicit retained-history toggle, and added a true Clear Findings action that preserves settings and scan history.
+- Turned benign, expected-scanner, and expected-service analyst dispositions into scoped, expiring learning exceptions that immediately remove matching visible findings.
+
+### IOC intelligence and alerts
+
+- Risk-ranked deduplicated feed indicators using provider confidence, cross-feed corroboration, malware/C2/phishing context, freshness, and IOC type before slicing 500-item batches.
+- Added automatic browser, Discord, and Telegram alert processing for high-priority IP, domain, and hash matches found in Elastic.
+- Fixed ThreatView large-feed ingestion, changed missing ThreatFox and MalwareBazaar credentials to explicit skipped states, and prevented allowlisted IOCs from shrinking a batch.
+- Made vendor collection concurrent, added bounded retries and request timeouts, and retained the strongest threat context when feeds disagree about the same IOC.
+- Corrected the IOC checked counter to report unique indicators rather than summed per-provider coverage.
+
 ## 0.12.5 - 2026-09-23
 
 - Isolated the classic content script so Chrome can inject it repeatedly without redeclaring top-level bindings or creating duplicate relays.

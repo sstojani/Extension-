@@ -11,6 +11,9 @@ export interface ThreatIntelProviderStatus {
 export interface ThreatIntelIOC extends ClassifiedIOC {
   sources: string[];
   sourceCount: number;
+  riskScore: number;
+  riskLevel: "critical" | "high" | "medium" | "low";
+  riskReasons: string[];
   malware?: string | undefined;
   threatType?: string | undefined;
   confidence?: number | undefined;
@@ -18,7 +21,7 @@ export interface ThreatIntelIOC extends ClassifiedIOC {
   reference?: string | undefined;
 }
 
-interface RawIntelIOC {
+export interface RawIntelIOC {
   value: string;
   source: string;
   malware?: string | undefined;
@@ -30,7 +33,21 @@ interface RawIntelIOC {
 
 type Collector = () => Promise<RawIntelIOC[]>;
 
-export async function collectDailyThreatIntel(maxIocs: number, batchOffset = 0): Promise<{
+const THREAT_FEED_TIMEOUT_MS = 15_000;
+const THREAT_FEED_ATTEMPTS = 2;
+
+export interface ThreatIntelSnapshot {
+  iocs: ThreatIntelIOC[];
+  providers: ThreatIntelProviderStatus[];
+  totalAvailable: number;
+  excluded: number;
+}
+
+export async function collectDailyThreatIntel(
+  maxIocs: number,
+  batchOffset = 0,
+  include: (ioc: ThreatIntelIOC) => boolean = () => true
+): Promise<{
   iocs: ThreatIntelIOC[];
   providers: ThreatIntelProviderStatus[];
   totalAvailable: number;
@@ -38,6 +55,21 @@ export async function collectDailyThreatIntel(maxIocs: number, batchOffset = 0):
   batchSize: number;
   hasMore: boolean;
 }> {
+  const snapshot = await collectThreatIntelSnapshot(include);
+  const iocs = snapshot.iocs.slice(batchOffset, batchOffset + maxIocs);
+  return {
+    iocs,
+    providers: snapshot.providers,
+    totalAvailable: snapshot.totalAvailable,
+    batchOffset,
+    batchSize: iocs.length,
+    hasMore: batchOffset + iocs.length < snapshot.totalAvailable
+  };
+}
+
+export async function collectThreatIntelSnapshot(
+  include: (ioc: ThreatIntelIOC) => boolean = () => true
+): Promise<ThreatIntelSnapshot> {
   const keys = await readProviderKeys();
   const collectors: Array<{ name: string; collect: Collector }> = [
     { name: "ThreatFox", collect: () => collectThreatFox(keys.threatFoxAuthKey) },
@@ -50,35 +82,38 @@ export async function collectDailyThreatIntel(maxIocs: number, batchOffset = 0):
     { name: "ThreatView Hash", collect: () => collectLineFeed("ThreatView Hash", "https://threatview.io/Downloads/SHA-HASH-FEED.txt") }
   ];
 
-  const records: RawIntelIOC[] = [];
-  const providers: ThreatIntelProviderStatus[] = [];
-
-  for (const collector of collectors) {
+  const outcomes = await Promise.all(collectors.map(async (collector) => {
     try {
       const collected = await collector.collect();
-      records.push(...collected);
-      providers.push({ name: collector.name, status: "healthy", collected: collected.length, byType: countByType(collected) });
+      return {
+        collected,
+        provider: { name: collector.name, status: "healthy", collected: collected.length, byType: countByType(collected) } satisfies ThreatIntelProviderStatus
+      };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Provider failed.";
-      providers.push({
-        name: collector.name,
-        status: message.includes("API key") ? "skipped" : "error",
-        collected: 0,
-        byType: {},
-        message
-      });
+      return {
+        collected: [] as RawIntelIOC[],
+        provider: {
+          name: collector.name,
+          status: message.includes("API key") ? "skipped" : "error",
+          collected: 0,
+          byType: {},
+          message
+        } satisfies ThreatIntelProviderStatus
+      };
     }
-  }
+  }));
+
+  const records = outcomes.flatMap((outcome) => outcome.collected);
+  const providers = outcomes.map((outcome) => outcome.provider);
 
   const deduped = dedupeIntel(records);
-  const iocs = deduped.slice(batchOffset, batchOffset + maxIocs);
+  const iocs = deduped.filter(include);
   return {
     iocs,
     providers,
-    totalAvailable: deduped.length,
-    batchOffset,
-    batchSize: iocs.length,
-    hasMore: batchOffset + iocs.length < deduped.length
+    totalAvailable: iocs.length,
+    excluded: deduped.length - iocs.length
   };
 }
 
@@ -94,7 +129,7 @@ function countByType(records: RawIntelIOC[]): Record<string, number> {
 
 async function collectThreatFox(authKey: string | undefined): Promise<RawIntelIOC[]> {
   if (!authKey) throw new Error("ThreatFox API key is not configured.");
-  const response = await fetch("https://threatfox-api.abuse.ch/api/v1/", {
+  const response = await fetchThreatFeed("https://threatfox-api.abuse.ch/api/v1/", {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -120,11 +155,12 @@ async function collectThreatFox(authKey: string | undefined): Promise<RawIntelIO
 }
 
 async function collectMalwareBazaar(authKey: string | undefined): Promise<RawIntelIOC[]> {
-  const response = await fetch("https://mb-api.abuse.ch/api/v1/", {
+  if (!authKey) throw new Error("MalwareBazaar API key is not configured.");
+  const response = await fetchThreatFeed("https://mb-api.abuse.ch/api/v1/", {
     method: "POST",
     headers: {
       "content-type": "application/x-www-form-urlencoded",
-      ...(authKey ? { "Auth-Key": authKey } : {})
+      "Auth-Key": authKey
     },
     body: new URLSearchParams({ query: "get_recent", selector: "100" }).toString()
   });
@@ -200,13 +236,40 @@ async function collectLineFeed(source: string, url: string): Promise<RawIntelIOC
 }
 
 async function fetchText(url: string): Promise<string> {
-  const response = await fetch(url);
+  const response = await fetchThreatFeed(url);
   if (!response.ok) throw new Error(`${new URL(url).hostname} returned HTTP ${response.status}.`);
   return response.text();
 }
 
-function dedupeIntel(records: RawIntelIOC[]): ThreatIntelIOC[] {
-  const byKey = new Map<string, ThreatIntelIOC>();
+async function fetchThreatFeed(url: string, init: RequestInit = {}): Promise<Response> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= THREAT_FEED_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), THREAT_FEED_TIMEOUT_MS);
+    try {
+      const response = await fetch(url, { ...init, signal: controller.signal });
+      const transient = response.status === 429 || response.status >= 500;
+      if (!transient || attempt === THREAT_FEED_ATTEMPTS) return response;
+      lastError = new Error(`${new URL(url).hostname} returned HTTP ${response.status}.`);
+    } catch (error) {
+      lastError = controller.signal.aborted
+        ? new Error(`${new URL(url).hostname} timed out after ${THREAT_FEED_TIMEOUT_MS / 1000} seconds.`)
+        : error;
+      if (attempt === THREAT_FEED_ATTEMPTS) throw lastError;
+    } finally {
+      clearTimeout(timer);
+    }
+    await waitForRetry(attempt * 500);
+  }
+  throw lastError instanceof Error ? lastError : new Error(`${new URL(url).hostname} request failed.`);
+}
+
+function waitForRetry(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+export function prioritizeThreatIntel(records: RawIntelIOC[], now = Date.now()): ThreatIntelIOC[] {
+  const byKey = new Map<string, Omit<ThreatIntelIOC, "riskScore" | "riskLevel" | "riskReasons">>();
   for (const record of records) {
     const classified = classifyIOC(record.value);
     if (classified.type === "unknown") continue;
@@ -216,10 +279,16 @@ function dedupeIntel(records: RawIntelIOC[]): ThreatIntelIOC[] {
       if (!existing.sources.includes(record.source)) existing.sources.push(record.source);
       existing.sourceCount = existing.sources.length;
       existing.confidence = Math.max(existing.confidence ?? 0, record.confidence ?? 0) || existing.confidence;
-      existing.malware = existing.malware ?? record.malware;
-      existing.threatType = existing.threatType ?? record.threatType;
+      if (threatContextWeight(record.threatType, record.malware) > threatContextWeight(existing.threatType, existing.malware)) {
+        existing.malware = record.malware ?? existing.malware;
+        existing.threatType = record.threatType ?? existing.threatType;
+        existing.reference = record.reference ?? existing.reference;
+      } else {
+        existing.malware = existing.malware ?? record.malware;
+        existing.threatType = existing.threatType ?? record.threatType;
+        existing.reference = existing.reference ?? record.reference;
+      }
       existing.firstSeen = earliest(existing.firstSeen, record.firstSeen);
-      existing.reference = existing.reference ?? record.reference;
       continue;
     }
     byKey.set(key, {
@@ -233,7 +302,107 @@ function dedupeIntel(records: RawIntelIOC[]): ThreatIntelIOC[] {
       reference: record.reference
     });
   }
-  return [...byKey.values()].sort((left, right) => right.sourceCount - left.sourceCount || left.normalized.localeCompare(right.normalized));
+  return [...byKey.values()]
+    .map((ioc) => scoreThreatIntel(ioc, now))
+    .sort((left, right) => right.riskScore - left.riskScore
+      || right.sourceCount - left.sourceCount
+      || compareSeenAt(right.firstSeen, left.firstSeen)
+      || left.normalized.localeCompare(right.normalized));
+}
+
+function dedupeIntel(records: RawIntelIOC[]): ThreatIntelIOC[] {
+  return prioritizeThreatIntel(records);
+}
+
+function scoreThreatIntel(
+  ioc: Omit<ThreatIntelIOC, "riskScore" | "riskLevel" | "riskReasons">,
+  now: number
+): ThreatIntelIOC {
+  const reasons: string[] = [];
+  let score = 10;
+  const sourceStrength = Math.max(...ioc.sources.map(providerRiskWeight), 0);
+  score += sourceStrength;
+  if (sourceStrength > 0) reasons.push(`High-confidence source: ${ioc.sources.find((source) => providerRiskWeight(source) === sourceStrength)}`);
+
+  if (ioc.sourceCount >= 3) {
+    score += 25;
+    reasons.push(`Corroborated by ${ioc.sourceCount} feeds`);
+  } else if (ioc.sourceCount === 2) {
+    score += 15;
+    reasons.push("Corroborated by two feeds");
+  }
+
+  if (typeof ioc.confidence === "number") {
+    const confidenceBoost = Math.round(Math.max(0, Math.min(100, ioc.confidence)) * 0.25);
+    score += confidenceBoost;
+    if (ioc.confidence >= 70) reasons.push(`Vendor confidence ${ioc.confidence}%`);
+  }
+
+  const context = `${ioc.threatType ?? ""} ${ioc.malware ?? ""}`.toLowerCase();
+  if (/command.?and.?control|\bc2\b|botnet/.test(context)) {
+    score += 22;
+    reasons.push("Command-and-control or botnet context");
+  } else if (/ransom|trojan|backdoor|malware|exploit/.test(context)) {
+    score += 18;
+    reasons.push("Malware or exploit context");
+  } else if (/phish|credential/.test(context)) {
+    score += 14;
+    reasons.push("Phishing or credential-theft context");
+  }
+
+  const ageMs = parsedTimestamp(ioc.firstSeen);
+  if (ageMs !== undefined) {
+    const ageDays = Math.max(0, (now - ageMs) / 86_400_000);
+    if (ageDays <= 2) {
+      score += 15;
+      reasons.push("First reported within 48 hours");
+    } else if (ageDays <= 7) {
+      score += 8;
+      reasons.push("First reported within seven days");
+    } else if (ageDays > 180) {
+      score -= 8;
+      reasons.push("Older indicator; verify that it is still active");
+    }
+  }
+
+  if (["md5", "sha1", "sha256"].includes(ioc.type)) score += 6;
+  else if (ioc.type === "ip") score += 5;
+  else if (ioc.type === "domain") score += 4;
+
+  const riskScore = Math.max(0, Math.min(100, Math.round(score)));
+  return {
+    ...ioc,
+    riskScore,
+    riskLevel: riskScore >= 80 ? "critical" : riskScore >= 60 ? "high" : riskScore >= 35 ? "medium" : "low",
+    riskReasons: reasons.slice(0, 5)
+  };
+}
+
+function providerRiskWeight(source: string): number {
+  if (source === "Feodo Tracker") return 28;
+  if (source === "ThreatFox" || source === "MalwareBazaar") return 25;
+  if (source.startsWith("ThreatView")) return 22;
+  if (source === "URLhaus") return 20;
+  if (source === "OpenPhish") return 18;
+  return 8;
+}
+
+function threatContextWeight(threatType: string | undefined, malware: string | undefined): number {
+  const context = `${threatType ?? ""} ${malware ?? ""}`.toLowerCase();
+  if (/command.?and.?control|\bc2\b|botnet/.test(context)) return 4;
+  if (/ransom|trojan|backdoor|malware|exploit/.test(context)) return 3;
+  if (/phish|credential/.test(context)) return 2;
+  return context.trim() ? 1 : 0;
+}
+
+function parsedTimestamp(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const parsed = Date.parse(value.replace(/ UTC$/i, "Z"));
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function compareSeenAt(left: string | undefined, right: string | undefined): number {
+  return (parsedTimestamp(left) ?? 0) - (parsedTimestamp(right) ?? 0);
 }
 
 function normalizeIpPort(value: string): string[] {

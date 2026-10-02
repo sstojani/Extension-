@@ -35,10 +35,16 @@ import {
 } from "lucide-react";
 import type { FleetSummary, KibanaStatus } from "@soc-watch/protocol";
 import type { DataViewSummary, SanitizedFleetAgent } from "@soc-watch/protocol";
+import {
+  DEFAULT_THREAT_RADAR_CARD_RULES,
+  DEFAULT_THREAT_RADAR_RISKY_PORTS,
+  DEFAULT_THREAT_RADAR_SIGNAL_RULES
+} from "@soc-watch/protocol";
 import type { ClassifiedIOC } from "@soc-watch/ioc";
 import { connectBridgeStream, detectBridgeExtension, getExtensionId, saveExtensionId, sendBridgeMessage, type BridgeStream } from "./bridge";
 import webPackage from "../package.json";
 import "./styles.css";
+import { ServerAgent } from "./ServerAgent";
 
 type Panel = "Dashboard" | "Infrastructure" | "Agents" | "IOC Search" | "IOC Hunt" | "Threat Radar" | "Logs" | "Watchlist" | "Alerts" | "Cases" | "Settings" | "Diagnostics";
 type HuntStatus = "idle" | "running" | "complete";
@@ -53,7 +59,7 @@ type IdentitySortField = "account" | "sourceIp" | "destination" | "events" | "fa
 type IdentitySort = { field: IdentitySortField; direction: RadarSortDirection };
 type GtiLookupStatus = "scored" | "not_configured" | "pending" | "not_found" | "rate_limited" | "unauthorized" | "unavailable";
 type RadarCardId = "identity" | "sources" | "destinations" | "outbound" | "denied" | "ports" | "indicators" | "review";
-type SettingsView = "agent" | "allowlist" | "integrations" | "dataViews" | "connection";
+type SettingsView = "agent" | "detections" | "allowlist" | "integrations" | "dataViews" | "connection";
 type LiveConnectionState = "checking" | "connected" | "degraded" | "disconnected";
 type ExtensionPresence = "checking" | "installed" | "missing";
 type AllowlistScope = "ip" | "domain" | "hash" | "identity" | "keyword" | "value";
@@ -85,6 +91,9 @@ type HuntedIOC = ClassifiedIOC & {
   threatType?: string;
   confidence?: number;
   firstSeen?: string;
+  riskScore: number;
+  riskLevel: "critical" | "high" | "medium" | "low";
+  riskReasons: string[];
 };
 type HuntResult = {
   ioc: HuntedIOC;
@@ -116,6 +125,9 @@ type DailyHuntResponse = {
   totalAvailable: number;
   nextBatchOffset: number;
   hasMore: boolean;
+  alertsCreated: number;
+  notificationsSent: number;
+  notificationsFailed: number;
 };
 type ThreatRadarSuspect = {
   ip: string;
@@ -228,6 +240,7 @@ type ThreatRadarIdentityAnomaly = {
   score?: number;
   severity?: "critical" | "high" | "medium" | "low";
   promoted?: boolean;
+  active?: boolean;
   baselineObservations?: number;
   offHours?: boolean;
   evidence?: string | string[];
@@ -262,6 +275,7 @@ type ThreatRadarResponse = {
   suspiciousDestinations: ThreatRadarSuspect[];
   suspiciousOutbound: ThreatRadarSuspect[];
   deniedActivity: ThreatRadarSuspect[];
+  riskyPortActivity?: ThreatRadarSuspect[];
   reviewCandidates?: ThreatRadarSuspect[];
   suspiciousIndicators: ThreatRadarIndicator[];
   identityAnomalies?: ThreatRadarIdentityAnomaly[];
@@ -333,6 +347,14 @@ type ThreatRadarAgentConfig = {
   intervalMinutes: number;
   indexPattern: string;
   timestampField: string;
+  historyRetentionHours: number;
+  riskyPorts: number[];
+  signalRules: Array<{
+    key: "denied" | "brute_force" | "malware" | "command_control" | "exfiltration" | "scanning" | "exploit" | "phishing";
+    enabled: boolean;
+    query: string;
+  }>;
+  cardRules: Array<{ id: RadarCardId; enabled: boolean; minScore: number; query: string }>;
   candidateExclusions: string[];
   candidateExceptions: CandidateException[];
 };
@@ -470,12 +492,34 @@ type AlertDashboardResponse = {
 
 const DAILY_HUNT_BATCH_SIZE = 500;
 const SOC_WATCH_WEB_VERSION = webPackage.version;
-const CURRENT_DETECTION_PACK_VERSION = "2.0.1";
+const CURRENT_DETECTION_PACK_VERSION = "3.0.0";
 const ANALYST_FEEDBACK_SUPPRESSION_MS = 7 * 24 * 60 * 60 * 1000;
 const IDENTITY_AUTH_SIGNAL_KEY = "identity_auth";
 const THREAT_RADAR_LAYOUT_KEY = "socWatchThreatRadarLayout";
 const THREAT_RADAR_PINNED_ANALYSIS_KEY = "socWatchThreatRadarPinnedAnalysis";
 const IOC_HUNT_CURSOR_KEY = "socWatchIocHuntCursors";
+
+const THREAT_RADAR_CARD_LABELS: Record<RadarCardId, string> = {
+  identity: "Authentication Attack Evidence",
+  sources: "Suspicious Source Flows",
+  destinations: "Suspicious Destination Flows",
+  outbound: "Suspicious Outbound Activity",
+  denied: "Denied and Failed Activity",
+  ports: "Suspicious Port Activity",
+  indicators: "Suspicious Domains and Hashes",
+  review: "Investigation Queue"
+};
+
+const THREAT_RADAR_SIGNAL_LABELS: Record<ThreatRadarAgentConfig["signalRules"][number]["key"], string> = {
+  denied: "Denied activity",
+  brute_force: "Brute force",
+  malware: "Malware",
+  command_control: "Command and control",
+  exfiltration: "Exfiltration",
+  scanning: "Scanning",
+  exploit: "Exploit",
+  phishing: "Phishing"
+};
 
 const nav: Array<{ label: Panel; icon: React.ComponentType<{ size?: number }> }> = [
   { label: "Dashboard", icon: Gauge },
@@ -491,6 +535,16 @@ const nav: Array<{ label: Panel; icon: React.ComponentType<{ size?: number }> }>
   { label: "Settings", icon: Settings },
   { label: "Diagnostics", icon: Activity }
 ];
+
+function ConsoleRouter() {
+  const [route, setRoute] = useState(window.location.hash);
+  useEffect(() => {
+    const change = () => setRoute(window.location.hash);
+    window.addEventListener("hashchange", change);
+    return () => window.removeEventListener("hashchange", change);
+  }, []);
+  return route === "#server-agent" ? <ServerAgent /> : <App />;
+}
 
 function App() {
   const [active, setActive] = useState<Panel>("Dashboard");
@@ -511,7 +565,7 @@ function App() {
   const [huntStatus, setHuntStatus] = useState<HuntStatus>("idle");
   const [huntProgress, setHuntProgress] = useState({ processed: 0, total: 0 });
   const [huntBatchOffset, setHuntBatchOffset] = useState(() => loadIocHuntOffset("today"));
-  const [huntBatchInfo, setHuntBatchInfo] = useState<Pick<DailyHuntResponse, "batchNumber" | "batchOffset" | "batchSize" | "totalAvailable" | "nextBatchOffset" | "hasMore"> | null>(null);
+  const [huntBatchInfo, setHuntBatchInfo] = useState<Pick<DailyHuntResponse, "batchNumber" | "batchOffset" | "batchSize" | "totalAvailable" | "nextBatchOffset" | "hasMore" | "alertsCreated" | "notificationsSent" | "notificationsFailed"> | null>(null);
   const [huntProviders, setHuntProviders] = useState<ProviderStatus[]>([]);
   const [huntResults, setHuntResults] = useState<HuntResult[]>([]);
   const [pinnedRadarAnalysis, setPinnedRadarAnalysis] = useState<PinnedThreatRadarAnalysis | null>(() => loadPinnedThreatRadarAnalysis());
@@ -529,7 +583,18 @@ function App() {
   const [malwareBazaarAuthKeySaved, setMalwareBazaarAuthKeySaved] = useState(false);
   const [googleThreatIntelApiKey, setGoogleThreatIntelApiKey] = useState("");
   const [googleThreatIntelApiKeySaved, setGoogleThreatIntelApiKeySaved] = useState(false);
-  const [threatRadarAgent, setThreatRadarAgent] = useState<ThreatRadarAgentConfig>({ enabled: true, intervalMinutes: 15, indexPattern: "logs-*", timestampField: "@timestamp", candidateExclusions: [], candidateExceptions: [] });
+  const [threatRadarAgent, setThreatRadarAgent] = useState<ThreatRadarAgentConfig>({
+    enabled: true,
+    intervalMinutes: 5,
+    indexPattern: "logs-*",
+    timestampField: "@timestamp",
+    historyRetentionHours: 24,
+    riskyPorts: [...DEFAULT_THREAT_RADAR_RISKY_PORTS],
+    signalRules: DEFAULT_THREAT_RADAR_SIGNAL_RULES.map((rule) => ({ ...rule })),
+    cardRules: DEFAULT_THREAT_RADAR_CARD_RULES.map((rule) => ({ ...rule })),
+    candidateExclusions: [],
+    candidateExceptions: []
+  });
   const [threatRadarAgentState, setThreatRadarAgentState] = useState<ThreatRadarAgentState>({});
   const [savingThreatRadarAgent, setSavingThreatRadarAgent] = useState(false);
   const streamRef = useRef<BridgeStream | null>(null);
@@ -732,6 +797,10 @@ function App() {
       setGoogleThreatIntelApiKeySaved(Boolean(response.data.googleThreatIntelApiKeySaved));
       if (response.data.threatRadarAgent) setThreatRadarAgent({
         ...response.data.threatRadarAgent,
+        historyRetentionHours: response.data.threatRadarAgent.historyRetentionHours ?? 24,
+        riskyPorts: response.data.threatRadarAgent.riskyPorts ?? [...DEFAULT_THREAT_RADAR_RISKY_PORTS],
+        signalRules: response.data.threatRadarAgent.signalRules ?? DEFAULT_THREAT_RADAR_SIGNAL_RULES.map((rule) => ({ ...rule })),
+        cardRules: response.data.threatRadarAgent.cardRules ?? DEFAULT_THREAT_RADAR_CARD_RULES.map((rule) => ({ ...rule })),
         candidateExclusions: response.data.threatRadarAgent.candidateExclusions ?? [],
         candidateExceptions: response.data.threatRadarAgent.candidateExceptions ?? []
       });
@@ -923,7 +992,10 @@ function App() {
         batchSize: response.data.batchSize,
         totalAvailable: response.data.totalAvailable,
         nextBatchOffset: response.data.nextBatchOffset,
-        hasMore: response.data.hasMore
+        hasMore: response.data.hasMore,
+        alertsCreated: response.data.alertsCreated,
+        notificationsSent: response.data.notificationsSent,
+        notificationsFailed: response.data.notificationsFailed
       });
       setHuntBatchOffset(response.data.nextBatchOffset);
       saveIocHuntOffset(huntTimeRange, response.data.nextBatchOffset >= response.data.totalAvailable ? 0 : response.data.nextBatchOffset);
@@ -959,6 +1031,22 @@ function App() {
       setRadarViewMode("manual");
     } else {
       setLastError(formatThreatRadarError(response.error.message, radarTimeRange));
+    }
+    setRadarLoading(false);
+  }
+
+  async function clearThreatRadarFindings() {
+    setRadarLoading(true);
+    setLastError(null);
+    const response = await sendBridgeMessage<unknown, { config: ThreatRadarAgentConfig; state: ThreatRadarAgentState }>("threatRadar.agent.clear", {});
+    if (response.success) {
+      setThreatRadarAgent(response.data.config);
+      setThreatRadarAgentState(response.data.state);
+      setPinnedRadarAnalysis(null);
+      clearPinnedThreatRadarAnalysis();
+      setRadarViewMode("automatic");
+    } else {
+      setLastError(response.error.message);
     }
     setRadarLoading(false);
   }
@@ -999,6 +1087,7 @@ function App() {
           </div>
         </div>
         <nav>
+          <a className="server-agent-link" href="#server-agent"><Server size={17} aria-hidden="true" /><span>Server Agent</span></a>
           {nav.map((item) => {
             const Icon = item.icon;
             return (
@@ -1132,6 +1221,7 @@ function App() {
             onTimeRangeChange={setRadarTimeRange}
             onAnalyze={runThreatRadar}
             onResumeAutomatic={resumeAutomaticThreatRadar}
+            onClearFindings={() => void clearThreatRadarFindings()}
           />
         ) : null}
         {active === "Alerts" ? <AlertsPanel /> : null}
@@ -1198,6 +1288,7 @@ function ExtensionInstallGate({
           <span>Secure browser bridge setup</span>
         </div>
         <span className="install-version">Web v{SOC_WATCH_WEB_VERSION}</span>
+        <a className="server-agent-link" href="#server-agent"><Server size={17} aria-hidden="true" />Server Agent</a>
       </header>
 
       <section className="install-intro" aria-labelledby="extension-install-title">
@@ -1551,6 +1642,46 @@ function SettingsPanel({
   const [allowlistReason, setAllowlistReason] = useState("");
   const [allowlistExpiry, setAllowlistExpiry] = useState("");
   const [allowlistError, setAllowlistError] = useState<string | null>(null);
+  const [riskyPortsDraft, setRiskyPortsDraft] = useState(() => threatRadarAgent.riskyPorts.join(", "));
+
+  useEffect(() => {
+    setRiskyPortsDraft(threatRadarAgent.riskyPorts.join(", "));
+  }, [threatRadarAgent.riskyPorts]);
+
+  function updateCardRule(id: RadarCardId, changes: Partial<ThreatRadarAgentConfig["cardRules"][number]>) {
+    onThreatRadarAgentChange({
+      ...threatRadarAgent,
+      cardRules: threatRadarAgent.cardRules.map((rule) => rule.id === id ? { ...rule, ...changes } : rule)
+    });
+  }
+
+  function updateSignalRule(key: ThreatRadarAgentConfig["signalRules"][number]["key"], changes: Partial<ThreatRadarAgentConfig["signalRules"][number]>) {
+    onThreatRadarAgentChange({
+      ...threatRadarAgent,
+      signalRules: threatRadarAgent.signalRules.map((rule) => rule.key === key ? { ...rule, ...changes } : rule)
+    });
+  }
+
+  function commitRiskyPorts() {
+    const ports = [...new Set(riskyPortsDraft
+      .split(/[^0-9]+/)
+      .map((value) => Number(value))
+      .filter((value) => Number.isInteger(value) && value >= 1 && value <= 65535))]
+      .sort((left, right) => left - right);
+    setRiskyPortsDraft(ports.join(", "));
+    onThreatRadarAgentChange({ ...threatRadarAgent, riskyPorts: ports });
+  }
+
+  function resetDetectionPolicy() {
+    const riskyPorts = [...DEFAULT_THREAT_RADAR_RISKY_PORTS];
+    setRiskyPortsDraft(riskyPorts.join(", "));
+    onThreatRadarAgentChange({
+      ...threatRadarAgent,
+      riskyPorts,
+      signalRules: DEFAULT_THREAT_RADAR_SIGNAL_RULES.map((rule) => ({ ...rule })),
+      cardRules: DEFAULT_THREAT_RADAR_CARD_RULES.map((rule) => ({ ...rule }))
+    });
+  }
 
   function addAllowlistEntry(event: React.FormEvent) {
     event.preventDefault();
@@ -1610,6 +1741,7 @@ function SettingsPanel({
         <div className="settings-tabs" role="tablist" aria-label="Settings sections">
           {([
             ["agent", "Threat Radar Agent"],
+            ["detections", "Detection Policy"],
             ["allowlist", "Allowlist"],
             ["integrations", "Integrations"],
             ["dataViews", "Data Views"],
@@ -1685,6 +1817,17 @@ function SettingsPanel({
                 <option value={60}>Every hour</option>
               </select>
             </label>
+            <label className="field">
+              <span>Finding retention</span>
+              <select value={threatRadarAgent.historyRetentionHours} onChange={(event) => onThreatRadarAgentChange({ ...threatRadarAgent, historyRetentionHours: Number(event.target.value) })}>
+                <option value={1}>1 hour</option>
+                <option value={6}>6 hours</option>
+                <option value={12}>12 hours</option>
+                <option value={24}>24 hours</option>
+                <option value={72}>3 days</option>
+                <option value={168}>7 days</option>
+              </select>
+            </label>
             <div className="agent-status" role="status">
               <strong>{threatRadarAgentState.status === "healthy" ? "Monitoring healthy" : threatRadarAgentState.status === "error" ? "Last scan failed" : threatRadarAgent.enabled ? "Ready to monitor" : "Monitoring paused"}</strong>
               <span>{formatThreatRadarAgentState(threatRadarAgentState)}</span>
@@ -1701,6 +1844,93 @@ function SettingsPanel({
           <ScanHistoryTable runs={threatRadarAgentState.scanHistory ?? []} />
         </section>
         </> : null}
+        {settingsView === "detections" ? <section className="detection-policy-settings" aria-labelledby="detection-policy-title">
+          <div className="panel-actions">
+            <div>
+              <h2 id="detection-policy-title">Detection Policy</h2>
+              <p className="muted">Tune what each Threat Radar panel may promote. Changes take effect on the next scan and remain inside this browser profile.</p>
+            </div>
+            <div className="top-actions">
+              <button className="secondary" type="button" onClick={resetDetectionPolicy}>
+                <RefreshCw size={16} aria-hidden="true" />
+                <span>Restore Defaults</span>
+              </button>
+              <button className="primary" type="button" onClick={onSaveThreatRadarAgent} disabled={savingThreatRadarAgent}>
+                <ShieldCheck size={16} aria-hidden="true" />
+                <span>{savingThreatRadarAgent ? "Saving" : "Save Policy"}</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="policy-section">
+            <div>
+              <h3>Dashboard Panels</h3>
+              <p className="muted">Disable a panel, raise its minimum evidence score, or require panel-specific evidence terms. Use | for alternatives and !term to exclude a match.</p>
+            </div>
+            <div className="policy-rule-list">
+              {threatRadarAgent.cardRules.map((rule) => (
+                <div className="policy-card-rule" key={rule.id}>
+                  <label className="policy-enabled">
+                    <input type="checkbox" checked={rule.enabled} onChange={(event) => updateCardRule(rule.id, { enabled: event.target.checked })} />
+                    <span>{THREAT_RADAR_CARD_LABELS[rule.id]}</span>
+                  </label>
+                  <label className="field compact-field">
+                    <span>Minimum score</span>
+                    <input type="number" min={0} max={200} value={rule.minScore} onChange={(event) => updateCardRule(rule.id, { minScore: Math.max(0, Math.min(200, Number(event.target.value) || 0)) })} />
+                  </label>
+                  <label className="field policy-query-field">
+                    <span>Additional evidence terms (optional)</span>
+                    <input
+                      value={rule.query}
+                      onChange={(event) => updateCardRule(rule.id, { query: event.target.value })}
+                      placeholder="for example ssh | port scan | !trusted-proxy"
+                    />
+                  </label>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="policy-section">
+            <div>
+              <h3>Signal Queries</h3>
+              <p className="muted">Signal expression (Elasticsearch simple_query_string)</p>
+            </div>
+            <div className="signal-query-list">
+              {threatRadarAgent.signalRules.map((rule) => {
+                const fallback = DEFAULT_THREAT_RADAR_SIGNAL_RULES.find((item) => item.key === rule.key)?.query ?? rule.query;
+                return (
+                  <div className="signal-query-rule" key={rule.key}>
+                    <label className="policy-enabled">
+                      <input type="checkbox" checked={rule.enabled} onChange={(event) => updateSignalRule(rule.key, { enabled: event.target.checked })} />
+                      <span>{THREAT_RADAR_SIGNAL_LABELS[rule.key]}</span>
+                    </label>
+                    <label className="field">
+                      <span>Query</span>
+                      <textarea
+                        rows={2}
+                        value={rule.query}
+                        onChange={(event) => updateSignalRule(rule.key, { query: event.target.value })}
+                        onBlur={() => { if (!rule.query.trim()) updateSignalRule(rule.key, { query: fallback }); }}
+                      />
+                    </label>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="policy-section">
+            <div>
+              <h3>Risky Destination Ports</h3>
+              <p className="muted">Comma-separated TCP or UDP destination ports used by the risky-service evidence model.</p>
+            </div>
+            <label className="field risky-ports-field">
+              <span>Ports</span>
+              <textarea rows={3} value={riskyPortsDraft} onChange={(event) => setRiskyPortsDraft(event.target.value)} onBlur={commitRiskyPorts} />
+            </label>
+          </div>
+        </section> : null}
         {settingsView === "allowlist" ? <section className="allowlist-settings" aria-labelledby="allowlist-title">
           <div className="panel-actions">
             <div>
@@ -2020,7 +2250,7 @@ function IOCHunt({
   filter: HuntFilter;
   status: HuntStatus;
   progress: { processed: number; total: number };
-  batchInfo: Pick<DailyHuntResponse, "batchNumber" | "batchOffset" | "batchSize" | "totalAvailable" | "nextBatchOffset" | "hasMore"> | null;
+  batchInfo: Pick<DailyHuntResponse, "batchNumber" | "batchOffset" | "batchSize" | "totalAvailable" | "nextBatchOffset" | "hasMore" | "alertsCreated" | "notificationsSent" | "notificationsFailed"> | null;
   providers: ProviderStatus[];
   results: HuntResult[];
   onTimeRangeChange: (value: HuntTimeRange) => void;
@@ -2033,7 +2263,7 @@ function IOCHunt({
   const filteredMatches = matched.filter((result) => matchesHuntFilter(result.ioc.type, filter));
   const first = matched[0]?.ioc ?? results[0]?.ioc;
   const collected = batchInfo?.totalAvailable ?? providers.reduce((sum, provider) => sum + provider.collected, 0);
-  const checked = providers.reduce((sum, provider) => sum + (provider.checked ?? 0), 0);
+  const checked = results.length;
   const healthySources = providers.filter((provider) => provider.status === "healthy").length;
   const typeStats = buildHuntTypeStats(results);
 
@@ -2087,8 +2317,10 @@ function IOCHunt({
             <p className="muted compact-copy">Showing SIEM matches only. Feed collection and checked coverage are below.</p>
             {batchInfo ? (
               <p className="hunt-batch-summary">
-                Batch {batchInfo.batchNumber}: indicators {batchInfo.batchOffset + 1}-{batchInfo.batchOffset + batchInfo.batchSize} of {batchInfo.totalAvailable} checked
+                Risk-ranked batch {batchInfo.batchNumber}: indicators {batchInfo.batchOffset + 1}-{batchInfo.batchOffset + batchInfo.batchSize} of {batchInfo.totalAvailable} checked
                 {batchInfo.hasMore ? " | Run Again checks the next batch" : " | All collected batches checked"}
+                {batchInfo.alertsCreated > 0 ? ` | ${batchInfo.alertsCreated} alert${batchInfo.alertsCreated === 1 ? "" : "s"} created` : ""}
+                {batchInfo.notificationsSent > 0 ? ` | ${batchInfo.notificationsSent} notification${batchInfo.notificationsSent === 1 ? "" : "s"} sent` : ""}
               </p>
             ) : null}
           </div>
@@ -2146,7 +2378,8 @@ function ThreatRadar({
   error,
   onTimeRangeChange,
   onAnalyze,
-  onResumeAutomatic
+  onResumeAutomatic,
+  onClearFindings
 }: {
   timeRange: RadarTimeRange;
   loading: boolean;
@@ -2159,8 +2392,10 @@ function ThreatRadar({
   onTimeRangeChange: (value: RadarTimeRange) => void;
   onAnalyze: () => void;
   onResumeAutomatic: () => void;
+  onClearFindings: () => void;
 }) {
   const [editingLayout, setEditingLayout] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
   const [layout, setLayout] = useState<RadarLayoutItem[]>(() => resolveRadarCollisions(loadThreatRadarLayout()));
   const [draggingCard, setDraggingCard] = useState<RadarCardId | null>(null);
   const [activeCardDrag, setActiveCardDrag] = useState<{
@@ -2192,14 +2427,17 @@ function ThreatRadar({
     active: boolean;
   } | null>(null);
   const activeCardDragRef = useRef<typeof activeCardDrag>(null);
-  const sourceSuspects = sortRadarSuspects(result?.externalSources ?? [], sourceSort);
-  const destinationSuspects = sortRadarSuspects(result?.suspiciousDestinations ?? [], destinationSort);
-  const outboundSuspects = sortRadarSuspects(result?.suspiciousOutbound ?? [], outboundSort);
-  const deniedSuspects = sortRadarSuspects(result?.deniedActivity ?? [], deniedSort);
-  const reviewCandidates = sortRadarSuspects(result?.reviewCandidates ?? [], reviewSort);
-  const identityAnomalies = normalizeIdentityAnomalies(result?.identityAnomalies);
+  const findingsForView = (findings: ThreatRadarSuspect[]) => showHistory
+    ? findings
+    : findings.filter((finding) => finding.active !== false);
+  const sourceSuspects = sortRadarSuspects(findingsForView(result?.externalSources ?? []), sourceSort);
+  const destinationSuspects = sortRadarSuspects(findingsForView(result?.suspiciousDestinations ?? []), destinationSort);
+  const outboundSuspects = sortRadarSuspects(findingsForView(result?.suspiciousOutbound ?? []), outboundSort);
+  const deniedSuspects = sortRadarSuspects(findingsForView(result?.deniedActivity ?? []), deniedSort);
+  const reviewCandidates = sortRadarSuspects(findingsForView(result?.reviewCandidates ?? []), reviewSort);
+  const identityAnomalies = normalizeIdentityAnomalies((result?.identityAnomalies ?? []).filter((finding) => showHistory || finding.active !== false));
   const portSuspects = sortRadarSuspects(
-    (result?.externalSources ?? []).filter((suspect) => suspect.dangerousPorts.length > 0),
+    findingsForView(result?.riskyPortActivity ?? (result?.externalSources ?? []).filter((suspect) => suspect.dangerousPorts.length > 0)),
     portSort
   );
   const suspiciousIndicators = result?.suspiciousIndicators ?? [];
@@ -2550,7 +2788,7 @@ function ThreatRadar({
             ? agentConfig.enabled
               ? `Showing the completed ${formatRadarRangeLabel(pinnedRange ?? timeRange).toLowerCase()} analysis. Automatic monitoring continues every ${agentConfig.intervalMinutes} minutes in the background and will not replace these findings.`
               : `Showing the completed ${formatRadarRangeLabel(pinnedRange ?? timeRange).toLowerCase()} analysis. Automatic monitoring is currently paused in Settings.`
-            : <>Scanning <strong>{agentConfig.indexPattern}</strong> every {agentConfig.intervalMinutes} minutes across threat signals, denied activity, risky authentication, exposed services, and traffic behavior. Public inbound threats require corroborated evidence; private hosts are evaluated only for suspicious outbound communication. Findings remain visible in a rolling 24-hour history.</>}</p>
+            : <>Scanning <strong>{agentConfig.indexPattern}</strong> every {agentConfig.intervalMinutes} minutes across threat signals, denied activity, risky authentication, exposed services, and traffic behavior. Public inbound threats require corroborated evidence; private hosts are evaluated only for suspicious outbound communication. Retained observations expire after {agentConfig.historyRetentionHours} hours.</>}</p>
           <p className="radar-run-summary">
             {result
               ? formatRadarCandidateSummary(result)
@@ -2565,6 +2803,19 @@ function ThreatRadar({
               <span>Run Automatically</span>
             </button>
           ) : null}
+          <button className="secondary" onClick={() => setShowHistory((value) => !value)} title="Switch between active findings and retained observations">
+            <ListChecks size={16} aria-hidden="true" />
+            <span>{showHistory ? "Live Findings" : "Include History"}</span>
+          </button>
+          <button
+            className="danger-button"
+            onClick={() => { if (window.confirm("Clear the current Threat Radar findings? Scan history and detection settings will be kept.")) onClearFindings(); }}
+            disabled={loading || !result}
+            title="Clear the current persisted findings and start with the next scan"
+          >
+            <Trash2 size={16} aria-hidden="true" />
+            <span>Clear Findings</span>
+          </button>
           <button className="secondary" onClick={editingLayout ? saveLayout : beginLayoutEdit}>
             <Settings size={16} aria-hidden="true" />
             <span>{editingLayout ? "Save Layout" : "Edit Layout"}</span>
@@ -3474,7 +3725,7 @@ function HuntResultCards({ results, hasRun }: { results: HuntResult[]; hasRun: b
     );
   }
 
-  const ranked = [...results].sort((left, right) => right.total - left.total);
+  const ranked = [...results].sort((left, right) => right.ioc.riskScore - left.ioc.riskScore || right.total - left.total);
   const hottest = ranked[0] as HuntResult;
 
   return (
@@ -3482,7 +3733,7 @@ function HuntResultCards({ results, hasRun }: { results: HuntResult[]; hasRun: b
       <div className="ranked-card-head">
         <div>
           <h3>Top SIEM IOC Matches</h3>
-          <span>Highest match count first</span>
+          <span>Threat-intel confidence first, then SIEM evidence volume</span>
         </div>
         <Badge value={`${ranked.length} matches`} />
       </div>
@@ -3490,6 +3741,10 @@ function HuntResultCards({ results, hasRun }: { results: HuntResult[]; hasRun: b
         <div>
           <span>Top IOC</span>
           <strong>{hottest.ioc.normalized}</strong>
+        </div>
+        <div>
+          <span>Priority</span>
+          <strong>{hottest.ioc.riskLevel} {hottest.ioc.riskScore}/100</strong>
         </div>
         <div>
           <span>Logs</span>
@@ -3506,6 +3761,7 @@ function HuntResultCards({ results, hasRun }: { results: HuntResult[]; hasRun: b
             <tr>
               <th>IOC</th>
               <th>Type</th>
+              <th>Priority</th>
               <th>Logs</th>
               <th>Action / Port</th>
               <th>Latest Event</th>
@@ -3517,6 +3773,10 @@ function HuntResultCards({ results, hasRun }: { results: HuntResult[]; hasRun: b
               <tr key={`${result.ioc.type}:${result.ioc.normalized}`}>
                 <td className="mono-cell">{result.ioc.normalized}</td>
                 <td>{result.ioc.type}</td>
+                <td>
+                  <Badge value={`${result.ioc.riskLevel} ${result.ioc.riskScore}`} />
+                  <small className="ioc-risk-reasons">{result.ioc.riskReasons.slice(0, 2).join(" | ")}</small>
+                </td>
                 <td>{result.total}</td>
                 <td>{formatActionPort(result.hits[0])}</td>
                 <td>{result.hits[0]?.timestamp ?? "--"}</td>
@@ -3877,7 +4137,7 @@ function AlertsPanel() {
       ...(expiresAt ? { expiresAt } : {})
     });
     if (response.success) {
-      setSavedMessage(`Alert marked ${formatDisposition(disposition)}. ${suppressesNotifications ? "Matching notifications are suppressed for seven days; use the structured allowlist for a permanent exception." : "The decision was added to the audit trail."}`);
+      setSavedMessage(`Alert marked ${formatDisposition(disposition)}. ${suppressesNotifications ? "A scoped seven-day learning exception was applied immediately and remains visible in the allowlist." : "The decision was added to the audit trail."}`);
       await loadAlerts(false);
     } else setAlertError(response.error.message);
     setLoadingAlerts(false);
@@ -4183,7 +4443,7 @@ function Placeholder({ panel }: { panel: Panel }) {
 
 function Badge({ value }: { value: string }) {
   const normalized = value.toLowerCase();
-  const tone = ["online", "clear", "match", "clean"].includes(normalized)
+  const tone = ["online", "clear", "match", "benign"].includes(normalized)
     ? "healthy"
     : ["offline", "error", "critical", "high", "malicious", "key rejected", "unavailable"].includes(normalized)
       ? "critical"
@@ -4648,7 +4908,7 @@ function formatGti(gti: ThreatRadarSuspect["gti"], target = ""): string {
   return `${getGtiCategory(gti)} | GTI ${gti.threatScore} | ${verdict} | VT ${gti.malicious}/${vendorTotal}${target && target !== "--" ? ` | ${target}` : ""}`;
 }
 
-function getGtiCategory(gti: ThreatRadarSuspect["gti"]): "Malicious" | "Suspicious" | "Clean" | "Unknown" {
+function getGtiCategory(gti: ThreatRadarSuspect["gti"]): "Malicious" | "Suspicious" | "Benign" | "Undetected" | "Unknown" {
   if (!gti) return "Unknown";
   if (/malicious/i.test(gti.verdict ?? "") || gti.malicious >= 3 || /critical|high/i.test(gti.severity ?? "") || gti.threatScore >= 70) return "Malicious";
   if (/suspicious/i.test(gti.verdict ?? "")
@@ -4657,7 +4917,7 @@ function getGtiCategory(gti: ThreatRadarSuspect["gti"]): "Malicious" | "Suspicio
     || /medium/i.test(gti.severity ?? "")
     || gti.threatScore >= 20
     || gti.reputation < 0) return "Suspicious";
-  return "Clean";
+  return /benign|harmless/i.test(gti.verdict ?? "") ? "Benign" : "Undetected";
 }
 
 function getGtiCategoryWeight(gti: ThreatRadarSuspect["gti"]): number {
@@ -4782,4 +5042,4 @@ function StatusTile({ label, value, tone }: { label: string; value: string; tone
   );
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+createRoot(document.getElementById("root")!).render(<ConsoleRouter />);
