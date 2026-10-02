@@ -47,13 +47,16 @@ export function validateConfig(value) {
 }
 
 export function runtimeConfig(env = process.env) {
-  const elasticUrl = env.SOC_WATCH_ELASTIC_URL || "";
+  const dataSource = env.SOC_WATCH_DATA_SOURCE || (env.SOC_WATCH_ELASTIC_API_KEY ? "direct" : "browser_relay");
+  if (!["direct", "browser_relay"].includes(dataSource)) throw new Error("SOC_WATCH_DATA_SOURCE must be direct or browser_relay.");
+  const elasticUrl = dataSource === "direct" ? env.SOC_WATCH_ELASTIC_URL || "" : "";
   if (elasticUrl) {
     const url = new URL(elasticUrl);
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error("Invalid Elasticsearch URL.");
     if (url.protocol === "http:" && env.SOC_WATCH_ALLOW_HTTP_ELASTIC !== "true") throw new Error("Use HTTPS Elasticsearch, or explicitly set SOC_WATCH_ALLOW_HTTP_ELASTIC=true on a trusted private network.");
   }
   return {
+    dataSource,
     elasticUrl: elasticUrl.replace(/\/$/, ""), elasticApiKey: env.SOC_WATCH_ELASTIC_API_KEY || "",
     gtiKey: env.SOC_WATCH_GTI_API_KEY || "", token: env.SOC_WATCH_AGENT_TOKEN || "",
     analysts: JSON.parse(env.SOC_WATCH_ANALYST_TOKENS || "[]"),

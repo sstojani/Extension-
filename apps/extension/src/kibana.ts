@@ -2685,12 +2685,13 @@ function readSearchTotal(raw: unknown): number {
   return readNumber(asRecord(total).value);
 }
 
-async function kibanaFetchJson(config: KibanaRuntimeConfig, path: string, init: RequestInit = {}): Promise<unknown> {
+export async function kibanaFetchJson(config: KibanaRuntimeConfig, path: string, init: RequestInit = {}, limits?: { timeoutMs: number; maxBytes: number }): Promise<unknown> {
   const url = new URL(path, config.kibanaBaseUrl);
   let response: Response;
   try {
     response = await fetch(url, {
       ...init,
+      ...(limits ? { signal: AbortSignal.timeout(limits.timeoutMs) } : {}),
       method: init.method ?? "GET",
       credentials: "include",
       headers: {
@@ -2700,7 +2701,7 @@ async function kibanaFetchJson(config: KibanaRuntimeConfig, path: string, init: 
       }
     });
   } catch (error) {
-    return kibanaTabFetchJson(config, path, init, error);
+    return kibanaTabFetchJson(config, path, init, error, limits);
   }
 
   const contentType = response.headers.get("content-type") ?? "";
@@ -2713,8 +2714,25 @@ async function kibanaFetchJson(config: KibanaRuntimeConfig, path: string, init: 
   if (!response.ok) throw new BridgeOperationError("KIBANA_UNREACHABLE", `Kibana returned HTTP ${response.status}.`);
 
   try {
+    if (limits) {
+      const reader = response.body?.getReader(), chunks: Uint8Array[] = [];
+      let length = 0;
+      if (!reader) throw new Error("Empty response");
+      try {
+        while (true) {
+          const chunk = await reader.read(); if (chunk.done) break;
+          length += chunk.value.length;
+          if (length > limits.maxBytes) { await reader.cancel(); throw new BridgeOperationError("RESULT_TOO_LARGE", "Reduce the relay page size; Kibana returned more than 8 MB."); }
+          chunks.push(chunk.value);
+        }
+      } finally { reader.releaseLock(); }
+      const bytes = new Uint8Array(length); let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+      return JSON.parse(new TextDecoder().decode(bytes));
+    }
     return await response.json();
-  } catch {
+  } catch (error) {
+    if (error instanceof BridgeOperationError) throw error;
     throw new BridgeOperationError("KIBANA_UNREACHABLE", "Kibana responded, but the response was not valid JSON.");
   }
 }
@@ -2727,7 +2745,8 @@ async function kibanaTabFetchJson(
   config: KibanaRuntimeConfig,
   path: string,
   init: RequestInit,
-  originalError: unknown
+  originalError: unknown,
+  limits?: { timeoutMs: number; maxBytes: number }
 ): Promise<unknown> {
   const kibanaOrigin = new URL(config.kibanaBaseUrl).origin;
   const tabs = await chrome.tabs.query({});
@@ -2763,9 +2782,10 @@ async function kibanaTabFetchJson(
   try {
     result = await chrome.scripting.executeScript({
       target: { tabId: kibanaTab.id },
-      func: async (apiPath: string, method: string, body: string | null) => {
+      func: async (apiPath: string, method: string, body: string | null, timeoutMs: number, maxBytes: number) => {
         const response = await fetch(apiPath, {
           method,
+          signal: AbortSignal.timeout(timeoutMs),
           credentials: "include",
           headers: {
             "content-type": "application/json",
@@ -2774,7 +2794,21 @@ async function kibanaTabFetchJson(
           ...(body === null ? {} : { body })
         });
         const contentType = response.headers.get("content-type") ?? "";
-        const text = await response.text();
+        const reader = response.body?.getReader(); let length = 0;
+        const chunks: Uint8Array[] = [];
+        if (reader) {
+          try {
+            while (true) {
+              const chunk = await reader.read(); if (chunk.done) break;
+              length += chunk.value.length;
+              if (length > maxBytes) { await reader.cancel(); throw new Error("Kibana response exceeds the size limit. Reduce the relay page size."); }
+              chunks.push(chunk.value);
+            }
+          } finally { reader.releaseLock(); }
+        }
+        const bytes = new Uint8Array(length); let offset = 0;
+        for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+        const text = new TextDecoder().decode(bytes);
         let json: unknown = null;
         try {
           json = text ? JSON.parse(text) : null;
@@ -2790,7 +2824,7 @@ async function kibanaTabFetchJson(
           textPrefix: text.slice(0, 120)
         };
       },
-      args: [path, init.method ?? "GET", typeof init.body === "string" ? init.body : null]
+      args: [path, init.method ?? "GET", typeof init.body === "string" ? init.body : null, limits?.timeoutMs ?? 30000, limits?.maxBytes ?? 32 * 1024 * 1024]
     });
   } catch (error) {
     throw new BridgeOperationError(

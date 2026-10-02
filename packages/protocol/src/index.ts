@@ -1,9 +1,14 @@
 import { z } from "zod";
+export * from "./relay.js";
 
 export const BRIDGE_VERSION = 1 as const;
 
 export const bridgeActions = [
   "bridge.ping",
+  "agent.relay.connect",
+  "agent.relay.heartbeat",
+  "agent.relay.execute",
+  "agent.relay.disconnect",
   "kibana.status",
   "dataViews.list",
   "dataViews.get",

@@ -5,6 +5,8 @@ import {
   Send, Server, Settings, ShieldCheck, Trash2, X
 } from "lucide-react";
 import "./server-agent.css";
+import { sendBridgeMessage } from "./bridge";
+import { runBrowserRelay, type RelayProgress } from "./browser-relay";
 
 type IndicatorType = "ip" | "domain" | "hash" | "identity";
 type FindingStatus = "open" | "acknowledged" | "resolved" | "false_positive";
@@ -67,6 +69,7 @@ export type AgentState = {
   status: {
     enabled: boolean; configured: boolean; running: boolean; lastSuccess: string | null;
     lastError: unknown; checkpoint: unknown; nextScan: string | null; heartbeat: unknown; coverage: unknown;
+    paused?: boolean; dataSource?: { mode: "direct" | "browser_relay"; ready: boolean; source?: { kibanaBaseUrl: string; spaceId: string } | null; lastSeen?: string | null };
   };
   config: AgentConfig; rules: WatchRule[]; findings: Finding[]; runs: Run[]; alerts: Alert[];
   deliveries: { id: string; channel: string; status: string; attempts: number; nextAttempt: string | null; error?: string }[];
@@ -273,6 +276,7 @@ function coverageIncomplete(coverage: unknown): boolean {
     record(coverage) && (coverage.complete === false || coverage.truncated === true || coverage.partial === true || coverage.status != null && coverageIncomplete(coverage.status));
 }
 export function scanHealth(state: AgentState, now = Date.now()): { label: string; detail: string; tone: Tone } {
+  if (state.status.dataSource?.mode === "browser_relay" && !state.status.dataSource.ready) return { label: "Collection paused", detail: "No authenticated work browser relay is available. Connect the browser to resume collection. Retained findings and server delivery are preserved.", tone: "error" };
   const latest = [...state.runs].sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt))[0];
   if (state.status.lastError) return { label: "Scan error", detail: message(state.status.lastError), tone: "error" };
   if (latest?.error || latest && /fail|error/.test(latest.status)) return { label: "Last scan failed", detail: latest.error ?? latest.status, tone: "error" };
@@ -499,6 +503,7 @@ export function ServerAgent() {
         <Feedback error={error} success={success} />
         {pollError && <p className="sa-feedback sa-error" role="alert"><AlertTriangle size={16} aria-hidden="true" />State refresh failed: {pollError}{updatedAt && ` Last update: ${date(updatedAt)}.`}</p>}
         {state && health ? <>
+          {state.status.dataSource?.mode === "browser_relay" && <BrowserRelayControl api={api} config={state.config} dataSource={state.status.dataSource} canAdmin={canAdmin} onChange={() => setRefresh(value => value + 1)} />}
           <section className="sa-status-strip" aria-label="Agent status">
             <div><span>Agent</span><Badge tone={health.tone}>{health.label}</Badge></div>
             <div><span>Heartbeat</span><strong>{date(record(state.status.heartbeat) ? state.status.heartbeat.at ?? state.status.heartbeat.timestamp ?? state.status.heartbeat.lastSeen : state.status.heartbeat)}</strong></div>
@@ -510,7 +515,7 @@ export function ServerAgent() {
           {health.tone !== "good" && <p className={`sa-feedback sa-${health.tone}`}><Activity size={16} aria-hidden="true" />{health.detail}</p>}
           <div className="sa-console-toolbar"><nav className="sa-tabs" aria-label="Console views">{tabs.map(({ name, icon: Icon }) => <button type="button" key={name} className={tab === name ? "sa-active" : ""} aria-current={tab === name ? "page" : undefined} onClick={() => setTab(name)}><Icon size={16} aria-hidden="true" />{name}</button>)}</nav>
             <div className="sa-actions"><select aria-label="Scan mode" value={scanMode} onChange={event => setScanMode(event.target.value as ScanMode)}><option value="live">Live scan</option><option value="today">Today</option><option value="baseline">Baseline</option></select>
-              <button type="button" className="sa-button sa-primary" disabled={!!busy || state.status.running || !state.status.configured} onClick={() => void action("scan", "/scan", { mode: scanMode }).then(ok => { if (ok) setSuccess("Scan queued. Progress will appear in run history."); })}><Play size={16} aria-hidden="true" />{busy === "scan" ? "Queueing..." : "Scan"}</button>
+              <button type="button" className="sa-button sa-primary" disabled={!!busy || state.status.running || !state.status.configured || state.status.dataSource?.ready === false} onClick={() => void action("scan", "/scan", { mode: scanMode }).then(ok => { if (ok) setSuccess("Scan queued. Progress will appear in run history."); })}><Play size={16} aria-hidden="true" />{busy === "scan" ? "Queueing..." : "Scan"}</button>
               <button type="button" className="sa-icon" title="Refresh state" aria-label="Refresh state" disabled={!!busy} onClick={() => setRefresh(value => value + 1)}><RefreshCw size={17} /></button></div>
           </div>
           <div className="sa-view" aria-label={tab}>
@@ -529,6 +534,39 @@ export function ServerAgent() {
 }
 
 export default ServerAgent;
+
+function BrowserRelayControl({ api, config, dataSource, canAdmin, onChange }: {
+  api: Api; config: AgentConfig; dataSource: NonNullable<AgentState["status"]["dataSource"]>; canAdmin: boolean; onChange: () => void;
+}) {
+  const [enabled, setEnabled] = useState(false);
+  const [progress, setProgress] = useState<RelayProgress>({ state: "disconnected", message: "" });
+  const scope = JSON.stringify({ indexPattern: config.indexPattern, timestampField: config.timestampField, infrastructureField: config.infrastructureField });
+  const [authorizedScope, setAuthorizedScope] = useState(scope);
+  const refresh = useRef(onChange); refresh.current = onChange;
+  useEffect(() => {
+    if (enabled && authorizedScope !== scope) {
+      setEnabled(false); setProgress({ state: "disconnected", message: "Log scope changed. Connect this browser again to authorize the saved scope." });
+    }
+  }, [enabled, authorizedScope, scope]);
+  useEffect(() => {
+    if (!enabled || !canAdmin) return;
+    const controller = new AbortController();
+    void runBrowserRelay({ api, bridge: sendBridgeMessage, signal: controller.signal,
+      policy: JSON.parse(authorizedScope),
+      onProgress: next => { setProgress(next); refresh.current(); }
+    });
+    return () => controller.abort();
+  }, [enabled, canAdmin, api, authorizedScope]);
+  const connected = enabled ? progress.state === "connected" && dataSource.ready : dataSource.ready;
+  return <section className="sa-relay" aria-label="Browser data source">
+    <div className="sa-section-heading"><div className="sa-actions"><Activity size={18} aria-hidden="true" /><h2>Browser relay</h2><Badge tone={connected ? "good" : "error"}>{connected ? enabled ? "This browser connected" : "Another browser connected" : progress.state === "connecting" ? "Connecting" : "Disconnected"}</Badge></div>
+      {canAdmin && <button className="sa-button" type="button" onClick={() => { if (!enabled) setAuthorizedScope(scope); setEnabled(value => !value); refresh.current(); }}><Activity size={16} aria-hidden="true" />{enabled ? "Disconnect browser" : "Connect this browser"}</button>}</div>
+    <p className="sa-muted">Keep this Server Agent page and a signed-in Kibana tab open on your work computer. Collection pauses when the browser disconnects. Returned log evidence is stored on this server; Kibana credentials stay in your browser.</p>
+    {progress.message && (enabled || authorizedScope !== scope) && <p className={progress.state === "disconnected" ? "sa-error" : "sa-muted"} role="status">{progress.message}{enabled && progress.state === "disconnected" && " Reconnecting automatically."}</p>}
+    {!enabled && dataSource.source && <p className="sa-muted">{dataSource.source.kibanaBaseUrl} / {dataSource.source.spaceId}</p>}
+    {!canAdmin && <p className="sa-warning">An administrator must authorize the work browser relay.</p>}
+  </section>;
+}
 
 export function orderedFindings(findings: Finding[]): Finding[] {
   return [...findings].sort((a, b) => b.priority - a.priority || Date.parse(b.lastSeen) - Date.parse(a.lastSeen) || a.id.localeCompare(b.id));

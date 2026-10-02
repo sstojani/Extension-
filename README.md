@@ -2,7 +2,7 @@
 
 SOC Watch is an internal cybersecurity console for Elastic/Kibana environments. It is split into a Chrome Manifest V3 bridge extension and a separate web application. The bridge reuses the analyst's already-authenticated Kibana browser session through `fetch(..., { credentials: "include" })` without reading, storing, or forwarding cookies or authentication material.
 
-Current product version: `0.14.0`. The Bridge Console verifies the extension; the new Server Agent console (`/#server-agent`) works independently with server-side read-only Elasticsearch credentials. Both display actual coverage/connection state.
+Current product version: `0.15.0`. The Bridge Console verifies the extension. The Server Agent console (`/#server-agent`) can collect through an authenticated work browser relay without an Elasticsearch API key, or use optional direct read-only Elasticsearch credentials. Both display actual coverage/connection state.
 
 ## Workspace
 
@@ -52,7 +52,7 @@ The configured ID is used as a direct-message fallback. The web app normally lea
 
 ## Security Baseline
 
-For browser-independent 24/7 monitoring, follow [Server Agent setup](docs/SERVER-AGENT.md). Hosting the web interface alone does not run continuous analysis. The server agent is opt-in, requires authenticated API access and dedicated read-only Elasticsearch credentials, and keeps integration secrets on the server. Its bounded investigations are evidence correlation, not an external AI model or a guarantee of complete detection.
+Follow [Server Agent setup](docs/SERVER-AGENT.md) for persistent analysis and notifications. Browser-relay collection requires a connected work browser with an authenticated Kibana session; the home server does not need network access to ELK or an Elasticsearch key. Browser-independent 24/7 collection still requires approved direct access. Integration secrets remain on the server. Its bounded investigations are evidence correlation, not an external AI model or a guarantee of complete detection.
 
 SOC Watch V1 is read-only. It does not request the Chrome `cookies` permission, does not implement an arbitrary authenticated proxy, and exposes only explicit RPC actions. Fleet responses are sanitized with allowlists before leaving the extension.
 

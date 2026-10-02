@@ -200,3 +200,5 @@
   .server-agent .sa-spin { animation: none; }
   .server-agent *, .server-agent *::before, .server-agent *::after { transition: none !important; scroll-behavior: auto !important; }
 }
+.server-agent .sa-relay { padding: 18px 0; border-bottom: 1px solid var(--sa-border, #293540); margin-bottom: 20px; }
+.server-agent .sa-relay p { max-width: 960px; overflow-wrap: anywhere; }

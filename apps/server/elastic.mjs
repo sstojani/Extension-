@@ -1,8 +1,25 @@
 import { INDICATOR_FIELDS } from "./intelligence.mjs";
+import { BrowserRelay } from "./relay.mjs";
 
 export class ElasticClient {
-  constructor(runtime, fetcher = fetch) { this.runtime = runtime; this.fetch = fetcher; }
+  constructor(runtime, fetcher = fetch) { this.runtime = runtime; this.fetch = fetcher; this.relay = runtime.dataSource === "browser_relay" ? new BrowserRelay() : null; }
+  ready() { return this.relay ? this.relay.status().ready : Boolean(this.runtime.elasticUrl && this.runtime.elasticApiKey); }
+  sourceIdentity() { return this.relay ? JSON.stringify(this.relay.status().source) : this.runtime.elasticUrl; }
   async request(path, body, method = "POST") {
+    if (this.relay) {
+      let operation;
+      if (path === "/_search" && method === "POST") operation = { kind: "search", body };
+      else if (path === "/_pit" && method === "DELETE") operation = { kind: "closePit", id: body.id };
+      else {
+        const parts = path.split("/");
+        const index = decodeURIComponent(parts[1] || "");
+        if (parts.length === 3 && parts[2] === "_pit?keep_alive=10m" && method === "POST") operation = { kind: "openPit", indexPattern: index };
+        else if (parts.length === 3 && parts[2] === "_field_caps" && method === "POST") operation = { kind: "fieldCaps", indexPattern: index, fields: body.fields };
+        else if (parts.length === 4 && parts[2] === "_doc" && method === "GET") operation = { kind: "evidence", index, id: decodeURIComponent(parts[3]) };
+        else throw new Error("Unsupported browser relay operation.");
+      }
+      return this.relay.execute(operation, this.signal);
+    }
     if (!this.runtime.elasticUrl || !this.runtime.elasticApiKey) throw new Error("Server Elasticsearch URL and read-only API key are not configured.");
     const response = await this.fetch(`${this.runtime.elasticUrl}${path}`, {
       method, headers: { authorization: `ApiKey ${this.runtime.elasticApiKey}`, "content-type": "application/json" },
@@ -19,6 +36,7 @@ export class ElasticClient {
     return Object.fromEntries(fields.map(field => [field, Object.values(caps.fields?.[field] || {}).some(type => type.searchable === true)]));
   }
   async page(config, from, to, cursor = null, extraQuery = null) {
+    if (this.relay) config = { ...config, pageSize: Math.min(config.pageSize, 500) };
     const pit = cursor?.pit || (await this.request(`/${encodeURIComponent(config.indexPattern)}/_pit?keep_alive=10m`, null)).id;
     if (typeof pit !== "string" || !pit) throw new Error("Elasticsearch did not return a valid point-in-time ID.");
     const filter = [{ range: { [config.timestampField]: { gte: from, lte: to } } }];

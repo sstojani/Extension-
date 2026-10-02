@@ -112,6 +112,7 @@ export function detectBridgeExtension(timeoutMs = 3000, requiredVersion?: string
 }
 
 function bridgeTimeoutForAction(action: BridgeAction): number {
+  if (action.startsWith("agent.relay.")) return 50000;
   if (action === "threatIntel.dailyHunt") return 300000;
   if (action === "threatRadar.analyze") return 300000;
   if (action === "threatRadar.agent.run") return 120000;

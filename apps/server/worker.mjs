@@ -28,10 +28,12 @@ export class AgentWorker {
       checkpoint: null, heartbeat: null, coverage: null, nextScan: null };
   }
   config() { return { ...defaults, ...this.store.get("config", {}) }; }
-  configured() { return Boolean(this.runtime.elasticUrl && this.runtime.elasticApiKey); }
+  configured() { return this.runtime.dataSource === "browser_relay" || Boolean(this.runtime.elasticUrl && this.runtime.elasticApiKey); }
+  ready() { return this.elastic.ready ? this.elastic.ready() : this.configured(); }
   request(mode = "live") {
     if (!["live", "today", "baseline"].includes(mode)) throw new Error("Invalid scan mode.");
     if (!this.configured()) throw new Error("Configure server read-only Elasticsearch credentials first.");
+    if (!this.ready()) throw new Error("Browser relay is disconnected. Connect your authenticated work browser first.");
     if (this.scan || this.store.get("scanRequest")) throw new Error("A scan is already queued or running.");
     this.store.set("scanRequest", { mode, requestedAt: this.clock() });
     this.store.audit("scan.requested", { mode });
@@ -45,7 +47,7 @@ export class AgentWorker {
       const config = this.config(), now = this.clock();
       const request = this.store.get("scanRequest");
       try {
-        if (this.scan || request || (config.enabled && this.configured() && (!this.status.nextScan || this.status.nextScan <= now))) await this.scanWindow(config, request?.mode || "live", now);
+        if (this.ready() && (this.scan || request || (config.enabled && this.configured() && (!this.status.nextScan || this.status.nextScan <= now)))) await this.scanWindow(config, request?.mode || "live", now);
       } catch (error) {
         this.status.lastError = error.message;
         if (this.scan) {
@@ -53,18 +55,18 @@ export class AgentWorker {
           if (this.scan.cursor?.pit) await this.elastic.closePit(this.scan.cursor.pit);
           this.scan.cursor = null; this.store.set("scan", this.scan);
         }
-        if (!this.stopping) await this.watchRules(config, new Date(Date.parse(now) - config.intervalMinutes * 60000).toISOString(), now);
+        if (!this.stopping && this.ready()) await this.watchRules(config, new Date(Date.parse(now) - config.intervalMinutes * 60000).toISOString(), now);
       }
       if (this.stopping) return;
-      if (this.configured() && this.store.get("watchPending", 0) > 0 && this.store.get("watchLastAttempt") !== now) {
+      if (this.ready() && this.store.get("watchPending", 0) > 0 && this.store.get("watchLastAttempt") !== now) {
         await this.watchRules(config, new Date(Date.parse(now) - config.intervalMinutes * 60000).toISOString(), now);
       }
       const enrichment = await enrichQueue(this.store, this.runtime, this.fetcher, this.clock());
       if (enrichment.changed?.length) this.reconsiderIndicators(enrichment.changed, this.config(), this.clock());
       if (this.stopping) return;
-      try { await this.investigationQueue(); } catch (error) { this.store.audit("investigation.failed", { error: error.message }); }
+      if (this.ready()) { try { await this.investigationQueue(); } catch (error) { this.store.audit("investigation.failed", { error: error.message }); } }
       if (this.stopping) return;
-      if (config.huntEnabled && this.configured()) { try { await this.huntTick(config, now); } catch (error) { this.store.audit("hunt.failed", { error: error.message }); } }
+      if (config.huntEnabled && this.ready()) { try { await this.huntTick(config, now); } catch (error) { this.store.audit("hunt.failed", { error: error.message }); } }
       await deliverQueue(this.store, this.store.get("notifications", { channels: [] }), this.fetcher, this.clock());
       this.store.prune(new Date(Date.parse(now) - config.retentionDays * 86400000).toISOString());
     } catch (error) {
@@ -72,18 +74,26 @@ export class AgentWorker {
     } finally { this.running = false; this.status.running = false; this.status.heartbeat = this.clock(); }
   }
   async scanWindow(config, mode, now) {
-    const scope = createHash("sha256").update(JSON.stringify([this.runtime.elasticUrl, config.indexPattern, config.timestampField, config.query])).digest("hex");
+    const source = this.elastic.sourceIdentity ? this.elastic.sourceIdentity() : this.runtime.elasticUrl;
+    const scope = createHash("sha256").update(JSON.stringify([source, config.indexPattern, config.timestampField, config.query])).digest("hex");
     const checkpoint = this.store.get(`checkpoint:${scope}`);
     this.status.checkpoint = checkpoint;
     if (!this.scan) {
       const from = mode === "today" ? dayStart(now, config.timezone) : mode === "baseline"
         ? new Date(Date.parse(now) - config.baselineDays * 86400000).toISOString()
         : new Date(Date.parse(checkpoint || now) - (checkpoint ? config.overlapMinutes : config.intervalMinutes) * 60000).toISOString();
-      this.scan = { id: randomUUID(), mode, from, to: now, startedAt: now, status: "running", eventsRead: 0, uniqueEvents: 0, invalidEvents: 0, totalMatched: 0, cursor: null, scope, config };
+      this.scan = { id: randomUUID(), mode, from, to: now, startedAt: now, status: "running", eventsRead: 0, uniqueEvents: 0, invalidEvents: 0, totalMatched: 0, cursor: null, scope, config, source };
       this.store.set("scanRequest", null); this.store.set("scan", this.scan);
       this.store.record("run", this.scan);
     }
     const scan = this.scan;
+    if (this.elastic.relay && scan.source === undefined) {
+      // Older failed direct scans have no source identity or reusable browser snapshot.
+      scan.source = source; scan.cursor = null;
+      scan.scope = createHash("sha256").update(JSON.stringify([source, scan.config.indexPattern, scan.config.timestampField, scan.config.query])).digest("hex");
+      this.store.set("scan", scan);
+    }
+    if (scan.source !== undefined && scan.source !== source) throw new Error("The scan belongs to a different data source. Reconnect the original browser source.");
     const tickStarted = Date.now();
     let readThisTick = 0;
     while (readThisTick < scan.config.maxEventsPerRun && Date.now() - tickStarted < 20000 && !this.stopping) {
@@ -243,7 +253,9 @@ export class AgentWorker {
   state() {
     const config = this.config(), reps = Object.values(this.store.reputationMap());
     const notifications = this.store.get("notifications", { channels: [], minPriority: config.autoAlertMinPriority, cooldownMinutes: 60 });
-    return { status: { ...this.status, enabled: config.enabled, configured: this.configured(), running: Boolean(this.scan) || this.running }, config,
+    const ready = this.ready();
+    return { status: { ...this.status, enabled: config.enabled, configured: this.configured(), running: ready && (Boolean(this.scan) || this.running), paused: !ready,
+      dataSource: this.elastic.relay ? this.elastic.relay.status() : { mode: "direct", ready } }, config,
       rules: this.store.list("rule"), findings: this.store.list("finding", 2000).sort((a,b) => b.priority - a.priority),
       alerts: this.store.list("alert", 200), runs: this.store.list("run", 30), deliveries: this.store.deliveries(),
       notifications: { ...notifications, channels: notifications.channels.map(({ url, token, chatId, ...c }) => ({ ...c, configured: Boolean(url || (token && chatId)) })) },
@@ -256,8 +268,12 @@ export class AgentWorker {
     for (const job of this.store.list("investigation", 1000).filter(j => j.status === "pending").slice(-2)) {
       const finding = this.store.one("finding", job.id);
       if (!finding) { this.store.remove("investigation", job.id); continue; }
-      try { this.store.record("investigation", await investigateFinding(finding, this.elastic, this.config(), this.store.reputationMap())); }
-      catch (error) { this.store.record("investigation", { ...job, status: "failed", error: error.message }); }
+      try {
+        const result = await investigateFinding(finding, this.elastic, this.config(), this.store.reputationMap());
+        if (!this.ready()) throw new Error("Browser relay disconnected; investigation will resume after reconnection.");
+        this.store.record("investigation", result);
+      }
+      catch (error) { this.store.record("investigation", { ...job, status: this.ready() ? "failed" : "pending", error: error.message }); }
     }
   }
   async huntTick(config, now) {

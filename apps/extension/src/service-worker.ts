@@ -47,6 +47,8 @@ import {
 } from "./threat-alerts";
 import { deriveConnectionHealth, type ConnectionState } from "./connection-health";
 import { normalizeThreatRadarAgentConfig } from "./threat-radar-policy";
+import { ServerBrowserRelay } from "./server-relay";
+const serverBrowserRelay = new ServerBrowserRelay();
 
 const THREAT_RADAR_AGENT_ALARM = "soc-watch-threat-radar-agent";
 const CONNECTION_HEALTH_ALARM = "soc-watch-connection-health";
@@ -253,7 +255,7 @@ async function handleExternalMessage(message: unknown, sender: chrome.runtime.Me
 
     const request = parseBridgeRequest(message);
     requestId = request.requestId;
-    const data = await dispatch(request);
+    const data = await dispatch(request, `${new URL(senderUrl(sender)!).origin}#${sender.tab?.id ?? "external"}`);
     await setConnectedBadge(request.action);
     return ok(requestId, data, elapsed(started));
   } catch (error) {
@@ -480,8 +482,17 @@ function isInternalConfigMessage(message: unknown): message is { type: "soc-watc
   }
 }
 
-async function dispatch(request: BridgeRequest): Promise<unknown> {
+async function dispatch(request: BridgeRequest, owner = ""): Promise<unknown> {
   switch (request.action) {
+    case "agent.relay.connect":
+    case "agent.relay.heartbeat":
+    case "agent.relay.execute":
+    case "agent.relay.disconnect":
+      try { return await serverBrowserRelay.handle(request.action, request.params, owner); }
+      catch (error) {
+        if (error instanceof BridgeOperationError || error instanceof ZodError) throw error;
+        throw new BridgeOperationError("INVALID_REQUEST", error instanceof Error ? error.message : "Browser relay request failed.");
+      }
     case "bridge.ping":
       return { extension: "SOC Watch Bridge", version: chrome.runtime.getManifest().version, status: "ok" };
     case "config.get":

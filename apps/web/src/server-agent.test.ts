@@ -25,6 +25,13 @@ function state(): AgentState {
     reputation: { pending: 0, unavailable: 0, scored: 0 }, campaigns: []
   };
 }
+
+it("never reports healthy or running collection for a disconnected browser relay", () => {
+  const snapshot = state();
+  snapshot.status.running = true;
+  snapshot.status.dataSource = { mode: "browser_relay", ready: false };
+  expect(scanHealth(snapshot, Date.parse(at))).toMatchObject({ label: "Collection paused", tone: "error" });
+});
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("server agent transport", () => {

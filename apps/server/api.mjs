@@ -1,8 +1,9 @@
 import { randomBytes, timingSafeEqual, randomUUID } from "node:crypto";
 import { validateConfig } from "./config.mjs";
 import { validateRule, validateNotifications } from "./alerts.mjs";
+import { relaySourceSchema, RELAY_MAX_BYTES } from "@soc-watch/protocol";
 
-export function createAgentApi(worker, runtime, version = "0.14.0") {
+export function createAgentApi(worker, runtime, version = "0.15.0") {
   const sessions = new Map(), failures = new Map();
   const store = worker.store;
   if (runtime.token && runtime.token.length < 32) throw new Error("SOC_WATCH_AGENT_TOKEN must contain at least 32 characters.");
@@ -15,7 +16,7 @@ export function createAgentApi(worker, runtime, version = "0.14.0") {
   const authenticated = request => {
     const id = cookie(request), session = sessions.get(id);
     if (session && session.expiration > Date.now()) return session;
-    if (id) sessions.delete(id);
+    if (id) { worker.elastic?.relay?.disconnect(id); sessions.delete(id); }
     return false;
   };
   return async function handle(request, response) {
@@ -59,8 +60,32 @@ export function createAgentApi(worker, runtime, version = "0.14.0") {
       const session = authenticated(request);
       if (!session) return json(401, { error: "Server agent login required." });
       if (request.method !== "GET" && ["config", "notifications", "rules", "clear"].some(r => route === r || route.startsWith(`${r}/`)) && session.role !== "admin") return json(403, { error: "An administrator token is required to change policy, rules or delivery settings." });
-      if (route === "logout" && request.method === "POST") { sessions.delete(cookie(request)); return json(200, { authenticated: false }, { "Set-Cookie": "soc_watch_session=; HttpOnly; SameSite=Strict; Path=/api/agent; Max-Age=0" }); }
+      if (route === "logout" && request.method === "POST") { worker.elastic?.relay?.disconnect(cookie(request)); sessions.delete(cookie(request)); return json(200, { authenticated: false }, { "Set-Cookie": "soc_watch_session=; HttpOnly; SameSite=Strict; Path=/api/agent; Max-Age=0" }); }
       if (route === "state" && request.method === "GET") return json(200, { ...worker.state(), session: { role: session.role, user: session.user } });
+      if (route.startsWith("relay/") && request.method === "POST") {
+        const relay = worker.elastic?.relay;
+        if (!relay) return json(409, { error: "This deployment is not in browser-relay mode." });
+        if (session.role !== "admin") return json(403, { error: "An administrator must authorize a browser relay." });
+        const body = await readBody(request, route === "relay/result" ? RELAY_MAX_BYTES : 65536);
+        if (typeof body.clientId !== "string" || !/^[a-f0-9-]{36}$/i.test(body.clientId)) throw new Error("Invalid browser relay client ID.");
+        if (route === "relay/connect") {
+          const source = relaySourceSchema.parse(body.source), config = worker.config();
+          const policy = { indexPattern: config.indexPattern, timestampField: config.timestampField, infrastructureField: config.infrastructureField };
+          if (JSON.stringify(source.policy) !== JSON.stringify(policy)) throw new Error("Relay authorization does not match the saved agent log scope.");
+          const identity = JSON.stringify([source.kibanaBaseUrl.replace(/\/$/, ""), source.spaceId]);
+          const original = store.get("relaySource");
+          if (original && original !== identity) throw new Error("This data directory is bound to another Kibana source. Use a separate data directory to avoid mixing organizations.");
+          const result = relay.connect(cookie(request), body.clientId, source);
+          store.set("relaySource", identity); store.audit("relay.connected", { source, actor: session.user });
+          // A new extension lease cannot use point-in-time IDs owned by the previous lease.
+          if (worker.scan?.cursor) { worker.scan.cursor = null; store.set("scan", worker.scan); }
+          for (const campaign of store.list("campaign", 5)) if (campaign.cursor) store.record("campaign", { ...campaign, cursor: null });
+          void worker.tick(); return json(200, result);
+        }
+        if (route === "relay/poll") return json(200, relay.poll(cookie(request), body.clientId));
+        if (route === "relay/result") return json(200, relay.result(cookie(request), body.clientId, body));
+        if (route === "relay/disconnect") { relay.disconnect(cookie(request), body.clientId); return json(200, { disconnected: true }); }
+      }
       if (route === "investigate" && request.method === "POST") {
         const id = (await readBody(request)).findingId;
         if (!store.one("finding", id)) throw new Error("Finding not found.");
@@ -69,6 +94,11 @@ export function createAgentApi(worker, runtime, version = "0.14.0") {
       }
       if (route === "config" && request.method === "PUT") {
         const config = validateConfig({ ...worker.config(), ...await readBody(request) });
+        if (worker.elastic?.relay && ["indexPattern", "timestampField", "infrastructureField"].some(key => config[key] !== worker.config()[key])) {
+          if (worker.scan || worker.running) throw new Error("Finish the current scan before changing its browser relay scope.");
+          const lease = worker.elastic.relay.lease;
+          if (lease) worker.elastic.relay.disconnect(lease.session, lease.clientId);
+        }
         store.set("config", config); store.audit("config.saved", config);
         return json(200, { config });
       }
@@ -132,11 +162,11 @@ export function createAgentApi(worker, runtime, version = "0.14.0") {
   };
 }
 
-async function readBody(request) {
+async function readBody(request, limit = 1048576) {
   let length = 0, chunks = [];
   for await (const chunk of request) {
     length += chunk.length;
-    if (length > 1048576) { const error = new Error("Request too large (maximum 1 MB)."); error.status = 413; throw error; }
+    if (length > limit) { const error = new Error("Request exceeds the endpoint size limit."); error.status = 413; throw error; }
     chunks.push(chunk);
   }
   const result = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");

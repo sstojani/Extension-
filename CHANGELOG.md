@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.15.0 - 2026-10-02
+
+- Added explicitly authorized browser-relay collection for the Server Agent using the work browser's authenticated Kibana session, without copying credentials or requiring an Elasticsearch API key.
+- Added scoped read-only relay jobs, authenticated session/tab ownership, size/page limits, source binding, reconnect/pause states and checkpoint-safe retries.
+- Added Browser relay controls and offline scan gating. Server reputation and durable notification delivery remain available when collection is paused.
+- Updated the protected environment example and deployment instructions. Browser relay requires an open work browser and console; it does not promise unattended collection after the browser closes.
+
 ## 0.14.0 - 2026-10-02
 
 - Add an opt-in persistent server agent: SQLite evidence/checkpoints, PIT/search_after continuation, independent watch queries, reputation retry queue and durable server notifications.

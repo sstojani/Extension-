@@ -1,16 +1,16 @@
-# Persistent Server Agent (0.14.0)
+# Persistent Server Agent (0.15.0)
 
 ## What Changes
 
-The website's previous Node service only served static files. The optional server agent adds a persistent SQLite database, a scheduler, read-only Elasticsearch queries, a reputation queue, evidence correlation, cases/findings, and durable notification delivery. It does not depend on an open browser, the Chrome extension, or Kibana cookies. Fleet/browser features remain in the Bridge Console.
+The optional server agent adds a persistent SQLite database, a scheduler, read-only log queries, a reputation queue, evidence correlation, cases/findings, and durable notification delivery. Browser-relay mode collects through the Chrome extension on an authenticated work computer. Direct mode can collect independently if the server has approved network access and read-only Elasticsearch credentials. Fleet/browser features remain in the Bridge Console.
 
-Open `/#server-agent` for the new console. The bridge installation gate has a Server Agent link; installing an extension is not required for server monitoring. Both modes show their actual connection/coverage state separately.
+Open `/#server-agent` for the console. The bridge installation gate has a Server Agent link. Browser relay requires the matching extension; direct mode does not. Both modes show actual connection/coverage state separately.
 
 This is an evidence-driven rule/correlation engine, not a generative AI model or a guarantee of attack detection. No logs are sent to an LLM. GTI only receives eligible public IP/domain/hash lookup values when its optional server key is configured. Browser-only settings/keys are NOT silently copied to the server.
 
 ## Server Setup
 
-Use Node.js 24 LTS. Server authentication and Elasticsearch credentials are mandatory to start useful scans. Keep the existing web port/Tailscale mapping; do not replace another application's Funnel configuration.
+Use Node.js 24 LTS. Server authentication is mandatory. Browser relay does not require an Elasticsearch API key or direct ELK connectivity from the home server. Keep the existing web port/Tailscale mapping; do not replace another application's Funnel configuration.
 
 On the Linux server after pulling this release:
 
@@ -35,11 +35,11 @@ Set these values in `/etc/soc-watch/agent.env`:
 - `SOC_WATCH_DATA_DIR=/var/lib/soc-watch`
 - `SOC_WATCH_PUBLIC_ORIGIN` to the exact console origin, including `:8443` if that is the port you use.
 - `SOC_WATCH_AGENT_TOKEN` to your generated token.
-- `SOC_WATCH_ELASTIC_URL` to Elasticsearch (usually port 9200), NOT the Kibana URL/port.
-- `SOC_WATCH_ELASTIC_API_KEY` to an encoded, dedicated read-only API key.
+- `SOC_WATCH_DATA_SOURCE=browser_relay` to use the authenticated work browser. Remove the Elasticsearch URL/key lines in this mode; stale direct values are ignored. When the mode is omitted, a supplied Elasticsearch key selects direct mode, otherwise browser relay is selected.
+- For optional direct access only: set `SOC_WATCH_DATA_SOURCE=direct`, `SOC_WATCH_ELASTIC_URL` to Elasticsearch (usually port 9200, NOT Kibana), and `SOC_WATCH_ELASTIC_API_KEY` to an encoded dedicated read-only key.
 - Optional GTI, ThreatFox and MalwareBazaar keys. Missing provider keys are shown as skipped, not healthy.
 
-The Elasticsearch API key should be restricted to the selected log indices, with `read` and `view_index_metadata`. No write/delete/admin privilege is needed by SOC Watch. PIT pagination and field-capability checks require the corresponding read/metadata access. Certificate verification remains enabled; use a trusted CA or `NODE_EXTRA_CA_CERTS`, never disable TLS verification. HTTP Elasticsearch is rejected unless explicitly enabled for a trusted private network.
+In direct mode, restrict the Elasticsearch key to the selected log indices, with `read` and `view_index_metadata`. No write/delete/admin privilege is needed. In browser mode, the current Kibana user's existing permissions apply to PIT searches and field-capability checks; this cannot bypass a permissions denial. Certificate verification remains enabled; never disable TLS verification.
 
 Install the updated service definition, preserving any existing `port.conf` drop-in:
 
@@ -52,6 +52,19 @@ sudo journalctl -u soc-watch-web -n 30 --no-pager
 ```
 
 The unit creates `/var/lib/soc-watch` owned by `socwatch` and allows writes only there. The environment file stays root-readable. Login to Server Agent using the access token, configure the actual index/fields/timezone, and run a Live scan. Enable automatic scanning only after confirming connectivity and coverage. Run Baseline to collect prior days if desired; large windows continue in bounded pages and may take many cycles.
+
+## Connect The Work Browser
+
+1. Open the hosted console on the work computer that can reach Kibana. Download Bridge v0.15.0 from the installation page, fully extract it to a permanent folder and load the folder containing `manifest.json` at `chrome://extensions`. Reload the console once.
+2. Set the correct Kibana URL/space in the Bridge settings and open a signed-in Kibana tab in the same browser profile.
+3. Sign in to Server Agent with an administrator token, save the log index, timestamp and infrastructure fields, then click **Connect this browser**. This explicitly authorizes returning log evidence to the SOC Watch server. Obtain your organization's approval before moving security telemetry to a home-hosted service.
+4. Verify **This browser connected**, run a Live scan, then enable Scheduled scanning in Agent Settings. Both this console tab and the authenticated work browser must remain open.
+
+The console polls bounded server jobs. The extension permits only scoped search snapshots, searches of up to 500 records, field-capability checks and referenced evidence reads. No API key, cookie or password is exported. Source fields and response sizes are bounded. System indexes, writes, scripts and arbitrary endpoints are rejected. Data-stream backing indexes are supported. One authenticated administrator session/tab provides a relay at a time. The database is bound to its first Kibana URL/space to prevent accidental cross-organization mixing; use a separate data directory for another source.
+
+Changing the saved log index or field scope disconnects the provider and requires explicit reconnection. The administrator token here is SOC Watch's server token, not a requirement for Kibana administrator privileges.
+
+Closing the browser/tab, signing out, losing connectivity or expiring the eight-hour server login pauses collection. The provider lease expires within 60 seconds after its last poll. Temporary failures reconnect automatically while this console is open and opted in; login expiry requires signing in again. Reloading/navigating away disconnects the provider and requires clicking Connect again. Pending fixed windows resume without advancing past unread events; expired snapshots are replayed with evidence deduplication. Browser sleep/timer throttling may pause collection. Server reputation follow-ups and already-queued notification delivery can continue without the browser, but **new ELK events cannot be collected while the relay is offline**. A home service alone is not an always-on route into the organization.
 
 ## Scanning And Evidence
 

@@ -1,8 +1,9 @@
 {
   "name": "@soc-watch/server",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "private": true,
   "type": "module",
+  "dependencies": { "@soc-watch/protocol": "0.1.0" },
   "engines": { "node": ">=24.0.0" },
   "scripts": {
     "test": "node --test test/*.test.mjs",
