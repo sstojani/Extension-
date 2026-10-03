@@ -37,6 +37,12 @@ try {
   };
   const errors = []; page.on("pageerror", error => errors.push(error.message));
   await page.addInitScript(() => {
+    window.fixtureNotifications = [];
+    window.Notification = class {
+      static permission = "default";
+      static async requestPermission() { this.permission = "granted"; return this.permission; }
+      constructor(title, options) { window.fixtureNotifications.push({ title, ...options }); }
+    };
     window.fixtureAuthenticated = true;
     window.fixtureSettingsError = true;
     window.fixtureConnections = 0;
@@ -49,7 +55,7 @@ try {
     const rows = Array.from({ length: 120 }, (_, i) => ({ _id: `${i}`, _index: ".ds-logs-network-default-2026.10.02-000001",
       sort: [new Date(Date.now() - 60000).toISOString(), i], _source: { "@timestamp": new Date(Date.now() - 60000).toISOString(),
         "source.ip": "185.220.101.4", "destination.ip": `10.0.0.${i % 10 + 1}`, "destination.port": 22,
-        "event.created": new Date(Date.now() - 60000).toISOString(), "event.action": "denied", "event.outcome": "failure", "observer.name": `edge-${i % 3}`, "host.name": "target" } }));
+        "event.created": new Date(Date.now() - 60000).toISOString(), "event.category": ["network"], "event.action": "denied", "event.outcome": "failure", "observer.name": `edge-${i % 3}`, "host.name": "target" } }));
     window.addEventListener("message", event => {
       if (event.source !== window || event.data?.source !== "soc-watch-web") return;
       const request = event.data.message;
@@ -85,6 +91,15 @@ try {
         }
         else if (operation.kind === "fieldCaps") data = { fields: Object.fromEntries(operation.fields.map(field => [field, { keyword: { searchable: true } }])) };
         else if (operation.kind === "evidence") data = rows.find(row => row._id === operation.id);
+        else if (operation.kind === "live") {
+          const proof = hits => ({ hits: { hits } });
+          const accepted = { ...rows.at(-1), _id: "accepted-context", _source: { ...rows.at(-1)._source, "event.action": "accept", "event.outcome": "success", "destination.port": 49876, "source.geo.country_name": "Kazakhstan" } };
+          data = { hits: { total: { value: rows.length, relation: "eq" }, hits: [] }, aggregations: operation.stage === "security"
+            ? { authentication: { users: { buckets: [], sum_other_doc_count: 0 } }, signals: { doc_count: 0, proof: proof([]) } }
+            : { sources: { sum_other_doc_count: 0, buckets: [{ key: "185.220.101.4", doc_count: operation.stage === "context" ? 1 : 120, doc_count_error_upper_bound: 0,
+              ports: { buckets: [{ key: 22, doc_count: 120 }] }, targets: { buckets: Array.from({ length: 10 }, (_, i) => ({ key: `10.0.0.${i + 1}`, doc_count: 12 })) },
+              proof: proof(operation.stage === "context" ? [accepted] : rows.slice(-5)) }] } } };
+        }
         else {
           if (!pits.delete(operation.body.pit.id)) throw new Error("Paging did not use an owned, current snapshot ID");
           const id = newPit(); pits.add(id); window.fixtureRotations++;
@@ -148,6 +163,11 @@ try {
   await page.getByRole("button", { name: "Refresh state", exact: true }).click();
   await page.getByRole("button", { name: "Connect this browser", exact: true }).click();
   await page.getByText("This browser connected", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Delivery", exact: true }).click();
+  await page.getByRole("button", { name: "Enable notifications", exact: true }).click();
+  assert.equal(await page.evaluate(() => Notification.permission), "granted");
+  await page.getByRole("button", { name: "Findings", exact: true }).click();
+  await page.getByLabel("Scan mode", { exact: true }).selectOption("today");
   await page.getByRole("button", { name: "Scan", exact: true }).click();
   await waitState(state => state.runs.some(run => run.status === "complete"));
   await page.getByRole("button", { name: "Refresh state", exact: true }).click();
@@ -156,6 +176,26 @@ try {
   assert.equal(before.runs[0].eventsRead, 120); assert.ok(before.alerts.length > 0);
   assert.ok(await page.evaluate(() => window.fixtureRotations >= 2), "Large snapshot IDs must rotate during pagination");
   assert.ok(await page.evaluate(() => window.fixtureClosedPits >= 2), "Rotated snapshots must be closed after collection and watch checks");
+  await page.getByLabel("Scan mode", { exact: true }).selectOption("live");
+  await page.getByRole("button", { name: "Scan", exact: true }).click();
+  await waitState(state => state.status.live.lastSuccess && state.runs.some(run => run.mode === "live_detection" && run.status === "complete"));
+  await page.getByRole("button", { name: "Refresh state", exact: true }).click();
+  const fresh = await page.evaluate(async () => (await (await fetch("/api/agent/state")).json()));
+  assert.equal(fresh.status.live.evidenceRead, 6);
+  const probing = fresh.findings.find(finding => finding.category === "scan");
+  assert.equal(probing.activity.allowed[0].action, "accept");
+  assert.deepEqual(probing.activity.countries, ["Kazakhstan"]);
+  await page.waitForFunction(() => window.fixtureNotifications.some(item => item.title === "Active probing with accepted network activity"));
+  const notification = await page.evaluate(() => window.fixtureNotifications.find(item => item.title === "Active probing with accepted network activity"));
+  assert.match(notification.body, /edge-/); assert.match(notification.body, /Kazakhstan/); assert.match(notification.body, /accept/);
+  await page.getByRole("button", { name: "Active probing with accepted network activity", exact: true }).click();
+  await page.getByRole("heading", { name: "Observed activity", exact: true }).waitFor();
+  await page.screenshot({ path: resolve(data, "desktop-live-evidence.png"), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: resolve(data, "mobile-live-evidence.png"), fullPage: true });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, "Mobile live-evidence overflow");
+  await page.getByRole("button", { name: "Close dialog", exact: true }).click();
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await page.screenshot({ path: resolve(data, "desktop-connected.png"), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: resolve(data, "mobile-connected.png"), fullPage: true });
@@ -169,11 +209,11 @@ try {
   assert.equal(await page.getByRole("button", { name: "Scan", exact: true }).isDisabled(), true);
   await page.screenshot({ path: resolve(data, "authentication-lost.png"), fullPage: true });
   await page.evaluate(() => { window.fixtureAuthenticated = true; });
-  await waitState(state => state.status.dataSource.ready && state.runs.filter(run => run.status === "complete").length >= 2, 45000);
+  await waitState(state => state.status.dataSource.ready && state.runs.filter(run => run.status === "complete").length >= 3, 45000);
   const after = await page.evaluate(async () => (await (await fetch("/api/agent/state")).json()));
   assert.equal(after.findings.find(f => f.category === "watched_indicator").count, before.findings.find(f => f.category === "watched_indicator").count);
   // Scope changes need fresh consent, rather than silently broadening browser access.
-  await waitState(state => !state.status.running && state.status.dataSource.ready);
+  await waitState(state => !state.status.running && !state.status.live.running && state.status.dataSource.ready);
   await page.evaluate(async () => {
     const saved = await fetch("/api/agent/config", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ indexPattern: "logs-network-default" }) });
     if (!saved.ok) throw new Error(await saved.text());
@@ -182,7 +222,7 @@ try {
   await page.getByRole("button", { name: "Connect this browser", exact: true }).waitFor();
   assert.equal((await page.evaluate(async () => (await (await fetch("/api/agent/state")).json()))).status.dataSource.ready, false);
   assert.deepEqual(errors, []);
-  console.log(`Browser relay regression passed: desktop/mobile, settings/permission failures, explicit data-view selection, large/rotated snapshot pagination, watch alert, auth loss and automatic recovery. Screenshots: ${data}`);
+  console.log(`Browser relay regression passed: desktop/mobile, bounded fresh detection with accepted-event context, instrumented browser notifications, settings/permission failures, explicit data-view selection, large/rotated snapshot pagination, watch alert, auth loss and automatic recovery. Screenshots: ${data}`);
 } catch (error) {
   await page?.screenshot({ path: resolve(data, "failure.png"), fullPage: true }).catch(() => {});
   console.error(`Browser test failure screenshot: ${data}`);

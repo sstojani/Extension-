@@ -254,7 +254,7 @@ test("malformed Elasticsearch hits cannot be interpreted as successful empty-win
     return Response.json({ succeeded: true });
   };
   const worker = new AgentWorker(f.store, new ElasticClient(f.runtime, fetcher), f.runtime, { fetcher: f.worker.fetcher, clock: f.clock });
-  worker.request();
+  worker.request("today");
   await worker.tick();
   assert.equal(calls.filter(call => call.url.endsWith("/_search")).length, 1);
   assert.equal(checkpoint(f), null, "Missing hits.hits must fail the page instead of advancing the checkpoint");

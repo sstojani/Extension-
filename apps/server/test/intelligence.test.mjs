@@ -91,7 +91,7 @@ test("normalizes exact nested ECS fields, flattened keys and scalar arrays", () 
   assert.equal(event.process, "curl");
   assert.equal(event.processEntityId, "proc-1");
   assert.equal(event.rawFields, raw._source);
-  assert.deepEqual(Object.keys(event).sort(), ["id", "index", "timestamp", "sourceIp", "destinationIp", "sourceDomain", "destinationDomain",
+  assert.deepEqual(Object.keys(event).sort(), ["id", "index", "timestamp", "sourceIp", "sourceCountry", "destinationIp", "sourceDomain", "destinationDomain",
     "ips", "domains", "hashes", "identity", "host", "infrastructure", "port", "action", "outcome", "category", "bytesOut", "bytesIn", "process", "processEntityId", "message", "rawFields"].sort());
 });
 

@@ -40,6 +40,10 @@ export const relayOperationSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("closePit"), id: relayPitIdSchema }).strict(),
   z.object({ kind: z.literal("fieldCaps"), indexPattern: relayPolicySchema.shape.indexPattern, fields: z.array(field).min(1).max(100) }).strict(),
   z.object({ kind: z.literal("evidence"), index: z.string().max(255).regex(/^(?:[a-zA-Z0-9_]|\.ds-)[a-zA-Z0-9_.-]+$/), id: z.string().min(1).max(2048) }).strict(),
+  z.object({ kind: z.literal("live"), indexPattern: relayPolicySchema.shape.indexPattern,
+    stage: z.enum(["scans", "context", "security"]), from: z.string().datetime(), to: z.string().datetime(),
+    query: z.string().max(2000), sources: z.array(z.string().ip()).max(32).optional()
+  }).strict(),
   z.object({ kind: z.literal("search"), body: z.object({
     pit: z.object({ id: relayPitIdSchema, keep_alive: z.literal("10m") }).strict(),
     size: z.number().int().min(1).max(500), track_total_hits: z.literal(true), timeout: z.literal("20s"),
@@ -70,6 +74,11 @@ export function validateRelayOperation(value: unknown, policy: RelayPolicy): Rel
   const operation = relayOperationSchema.parse(value);
   if ("indexPattern" in operation && operation.indexPattern !== policy.indexPattern) throw new Error("Relay index scope changed; reconnect with the saved policy.");
   if (operation.kind === "evidence" && !relayIndexAllowed(operation.index, policy.indexPattern)) throw new Error("Evidence index is outside the authorized log scope.");
+  if (operation.kind === "live") {
+    const duration = Date.parse(operation.to) - Date.parse(operation.from);
+    if (duration <= 0 || duration > 15 * 60000) throw new Error("Live queries require a fixed window of at most 15 minutes.");
+    if (operation.stage === "context" ? !operation.sources?.length : operation.sources !== undefined) throw new Error("Only live context queries accept candidate source IPs.");
+  }
   if (operation.kind === "search") {
     const sort = operation.body.sort;
     if (JSON.stringify(sort) !== JSON.stringify([{ [policy.timestampField]: { order: "asc", unmapped_type: "date" } }, { _shard_doc: "asc" }])) throw new Error("Unsupported relay sort.");
@@ -85,4 +94,49 @@ export function validateRelayOperation(value: unknown, policy: RelayPolicy): Rel
 }
 export const relaySourceFields = (policy: RelayPolicy) => [policy.timestampField, policy.infrastructureField,
   "event.*", "source.*", "destination.*", "client.*", "server.*", "host.*", "observer.*", "agent.*", "user.*",
-  "dns.*", "url.*", "file.*", "process.*", "network.*", "rule.*", "threat.*", "related.*", "message", "log.*"];
+  "dns.*", "url.*", "file.*", "process.*", "network.*", "rule.*", "threat.*", "related.*", "kibana.alert.*", "message", "log.*"];
+
+// The extension constructs these fixed templates itself; callers cannot supply aggregation DSL.
+export function relayLiveSearch(value: unknown, policy: RelayPolicy): Record<string, unknown> {
+  const operation = validateRelayOperation(value, policy);
+  if (operation.kind !== "live") throw new Error("Expected a live operation.");
+  const terms = (name: string, size: number) => ({ terms: { field: name, size, shard_size: size * 3, show_term_doc_count_error: true } });
+  const proof = (size: number) => ({ top_hits: { size, sort: [{ [policy.timestampField]: { order: "desc", unmapped_type: "date" } }], _source: relaySourceFields(policy) } });
+  const blocked = { bool: { should: [{ terms: { "event.action": ["deny", "denied", "drop", "dropped", "block", "blocked", "reject", "rejected", "connection_denied", "connection-denied", "connection_blocked", "connection-blocked", "firewall_denied", "prevented", "quarantined"] } },
+    { term: { "event.type": "denied" } }], minimum_should_match: 1 } };
+  const filter: unknown[] = [{ range: { [policy.timestampField]: { gte: operation.from, lte: operation.to } } }];
+  if (operation.query) filter.push({ query_string: { query: operation.query, lenient: false, allow_leading_wildcard: false } });
+  let aggs: Record<string, unknown>;
+  if (operation.stage === "scans") {
+    filter.push({ term: { "event.category": "network" } }, blocked);
+    // Remove internal/resolver chatter before selecting the busiest source buckets.
+    const nonPublic = ["0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16",
+      "192.0.0.0/24", "192.0.2.0/24", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/3",
+      "::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8", "2001:db8::/32"];
+    filter.push({ bool: { must_not: [...nonPublic.map(cidr => ({ term: { "source.ip": cidr } })),
+      { terms: { "source.ip": ["1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4", "9.9.9.9", "149.112.112.112",
+        "208.67.222.222", "208.67.220.220", "94.140.14.14", "94.140.15.15", "2606:4700:4700::1111", "2606:4700:4700::1001",
+        "2001:4860:4860::8888", "2001:4860:4860::8844", "2620:fe::fe", "2620:fe::9"] } },
+      { term: { "source.port": 53 } }, { term: { "destination.port": 53 } }, { term: { "network.protocol": "dns" } }] } });
+    aggs = { sources: { ...terms("source.ip", 32), aggs: {
+      ports: terms("destination.port", 128), targets: terms("destination.ip", 128),
+      proof: proof(5)
+    } } };
+  } else if (operation.stage === "context") {
+    filter.push({ terms: { "source.ip": operation.sources } }, { term: { "event.category": "network" } },
+      { bool: { should: [{ terms: { "event.action": ["accept", "accepted", "allow", "allowed", "connection-started", "connection-finished"] } },
+        { term: { "event.outcome": "success" } }], minimum_should_match: 1, must_not: [blocked, { term: { "event.outcome": "failure" } }] } });
+    aggs = { sources: { ...terms("source.ip", 32), aggs: { proof: proof(3) } } };
+  } else {
+    const authentication = { term: { "event.category": "authentication" } };
+    const signals = { bool: { should: [{ term: { "event.kind": "alert" } }, { exists: { field: "threat.indicator.type" } }], minimum_should_match: 1 } };
+    filter.push({ bool: { should: [authentication, signals], minimum_should_match: 1 } });
+    aggs = {
+      authentication: { filter: authentication, aggs: {
+        users: { ...terms("user.name", 20), aggs: { proof: proof(20) } }
+      } },
+      signals: { filter: signals, aggs: { proof: proof(100) } }
+    };
+  }
+  return { size: 0, track_total_hits: true, timeout: "15s", query: { bool: { filter } }, aggs };
+}

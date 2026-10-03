@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.16.0 - 2026-10-03
+
+- Separate fresh live detection from historical pagination, reputation retries, investigations and feed collection. Prioritize fixed-window live jobs in the authenticated browser relay; raw Today/Baseline collection remains optional background work.
+- Use bounded, extension-constructed Elasticsearch aggregation templates with a 15-second search timeout and fixed saved scope. Inspect up to 32 blocked source groups and sampled authentication/security evidence instead of downloading every matching event.
+- Report scan fanout lower bounds, log-supplied GeoIP, targets, ports and exact accepted-action timestamps. Suppress routine resolver/response traffic; preserve explicit exceptions and original ELK high-severity alert attribution. No invented C2, location or compromise conclusions.
+- Keep sampled evidence out of normal baseline learning; retain deduplicated proof/alert history. Deliver fresh alerts before backfill and guard concurrent delivery from duplicate sends.
+- Add live monitoring controls, stage coverage, recent versus retained findings, and cancellable historical collection without deleting evidence or advancing unfinished checkpoints. Preserve denied-request codes and pause permanently rejected historical reads.
+- Add live/backlog concurrency, scope, sampling, false-positive, notification and production browser relay regressions. Organization-specific permissions, query latency, mappings and browser/OS notification delivery still require deployment validation.
+
 ## 0.15.3 - 2026-10-03
 
 - Replace the restrictive 16 KiB snapshot-ID cap with a shared 1 MiB UTF-8 byte limit across extension, console and server relay validation; keep the saved log scope, 500-record page cap and 8 MiB response limit unchanged.

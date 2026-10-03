@@ -46,6 +46,7 @@ export function recordAlert(store, finding, { rule = null, channels, cooldownMin
           severity: finding.severity,
           reasons: finding.reasons,
           evidence: finding.evidence,
+          activity: finding.activity,
           updatedAt: now,
         });
         store.set(`alert:${key}`, { at: now, priority: finding.priority, lastSeen: finding.lastSeen, alertId: updated.id });
@@ -58,8 +59,8 @@ export function recordAlert(store, finding, { rule = null, channels, cooldownMin
   const alert = store.record("alert", { id: randomUUID(), findingId: finding.id || finding.fingerprint,
     title: rule ? `Watched indicator: ${rule.name}` : finding.title, indicator: finding.indicator,
     indicatorType: finding.indicatorType, priority: finding.priority, severity: finding.severity,
-    host: finding.host, sourceIp: finding.sourceIp, destinationIp: finding.destinationIp,
-    reasons: finding.reasons, evidence: finding.evidence, createdAt: now, ruleId: rule?.id || null,
+    host: finding.host, sourceIp: finding.sourceIp, destinationIp: finding.destinationIp, activity: finding.activity,
+    reasons: finding.reasons, evidence: finding.evidence, lastSeen: finding.lastSeen, createdAt: now, ruleId: rule?.id || null,
     idempotencyKey: key, status: "open" });
   store.set(`alert:${key}`, { at: now, priority: finding.priority, lastSeen: finding.lastSeen, alertId: alert.id });
   for (const channel of channels.filter(c => c.enabled && (!rule?.channels?.length || rule.channels.includes(c.id)))) store.queueDelivery(alert, channel, now);

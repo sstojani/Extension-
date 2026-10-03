@@ -27,6 +27,18 @@ const body = { pit: { id: "pit", keep_alive: "10m" }, size: 500, track_total_hit
   sort: [{ "@timestamp": { order: "asc", unmapped_type: "date" } }, { _shard_doc: "asc" }] };
 
 describe("extension server relay", () => {
+  it("constructs live queries in the extension and rejects out-of-scope nested proof", async () => {
+    const { relay, request } = fixture();
+    const connection = await relay.handle("agent.relay.connect", policy, owner) as { relayId: string };
+    const operation = { kind: "live", indexPattern: "logs-*", stage: "scans", from: "2026-10-03T10:00:00.000Z", to: "2026-10-03T10:05:00.000Z", query: "" };
+    request.mockResolvedValueOnce({ aggregations: { sources: { buckets: [] } } });
+    await relay.handle("agent.relay.execute", { relayId: connection.relayId, jobId: crypto.randomUUID(), operation }, owner);
+    const call = request.mock.calls.at(-1)!;
+    expect(new URL(`https://kibana.internal${call[1]}`).searchParams.get("path")).toBe("/logs-*/_search");
+    expect(JSON.parse(call[2]!.body as string)).toMatchObject({ size: 0, timeout: "15s", aggs: { sources: { terms: { size: 32 } } } });
+    request.mockResolvedValueOnce({ aggregations: { sources: { buckets: [{ proof: { hits: { hits: [{ _index: "finance-secret", _id: "bad" }] } } }] } } });
+    await expect(relay.handle("agent.relay.execute", { relayId: connection.relayId, jobId: crypto.randomUUID(), operation }, owner)).rejects.toThrow("outside the authorized");
+  });
   it("uses portable field-capabilities query parameters for connection, heartbeat and jobs", async () => {
     const { relay, request } = fixture();
     const connection = await relay.handle("agent.relay.connect", policy, owner) as { relayId: string };

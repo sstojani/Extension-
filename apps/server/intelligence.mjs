@@ -157,6 +157,7 @@ export function normalizeEvent(hit, { timestampField = "@timestamp", infrastruct
     index: typeof hit._index === "string" ? hit._index : null,
     timestamp: time,
     sourceIp: strings(source, "source.ip").map(ip).find(Boolean) ?? null,
+    sourceCountry: firstString(source, "source.geo.country_name", "source.geo.country_iso_code"),
     destinationIp: strings(source, "destination.ip").map(ip).find(Boolean) ?? null,
     ips: unique(INDICATOR_FIELDS.ip.flatMap(path => strings(source, path).map(ip))),
     sourceDomain,
@@ -949,7 +950,7 @@ export function analyzeEvidence(events, { reputations = {}, baselines = {}, conf
   rebuildRejectedDays(baseline);
   budget.hosts = Object.keys(baseline.hosts).length;
   budget.users = Object.keys(baseline.users).length;
-  for (const event of normalized) if (normalObservation(event)) observe(baseline, event, local(event.timestamp), budget);
+  for (const event of normalized) if (!event.sampled && normalObservation(event)) observe(baseline, event, local(event.timestamp), budget);
   beacons(correlated, findings, options);
   exfiltration(correlated, findings, options);
   for (const finding of findings.values()) if (finding.confidence >= 80) for (const key of finding._eventKeys) rejected.add(key);
@@ -985,4 +986,89 @@ export function analyzeEvidence(events, { reputations = {}, baselines = {}, conf
     outboundBytes: normalized.filter(outbound).reduce((sum, event) => sum + (event.bytesOut ?? 0), 0),
     reviewContexts: coverage.reviewContexts.length };
   return { findings: result, baselines: baseline, coverage, metrics };
+}
+
+export function activityContext(events) {
+  const ordered = [...events].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  return {
+    infrastructures: unique(ordered.map(event => event.infrastructure)).slice(0, 16),
+    targets: unique(ordered.map(event => event.destinationIp)).slice(0, 16),
+    ports: unique(ordered.map(event => event.port)).sort((a, b) => a - b).slice(0, 128),
+    countries: unique(ordered.map(event => event.sourceCountry)).slice(0, 8),
+    allowed: ordered.filter(event => disposition(event) === "allowed").slice(-5).map(event => ({
+      eventId: event.id, index: event.index, timestamp: event.timestamp, action: event.action, outcome: event.outcome,
+      sourceIp: event.sourceIp, destinationIp: event.destinationIp, port: event.port, infrastructure: event.infrastructure
+    }))
+  };
+}
+
+export function liveScanCandidates(raw, config, from, to) {
+  const policy = settings(config);
+  return raw.aggregations.sources.buckets.filter(bucket => {
+    if (addressScope(bucket.key) !== "public" || DNS_RESOLVERS.has(ip(bucket.key)) || bucket.doc_count < policy.scanMinAttempts) return false;
+    const ports = bucket.ports.buckets.filter(item => Number.isInteger(item.key) && item.key > 0 && item.key <= 65535);
+    const targets = bucket.targets.buckets.filter(item => ip(item.key));
+    if (ports.length < policy.scanMinPorts && targets.length < policy.scanMinTargets) return false;
+    // A scoped exception cannot safely be subtracted from an all-source aggregate.
+    if ((config.exceptions || []).some(e => e.enabled !== false && e.indicatorType === "ip" && ip(e.indicatorValue) === ip(bucket.key)
+      && (!e.expiresAt || Date.parse(e.expiresAt) > Date.parse(to)))) return false;
+    const proof = bucket.proof.hits.hits.map(hit => normalizeEvent(hit, config)).filter(event => event && event.sourceIp === ip(bucket.key)
+      && event.timestamp >= from && event.timestamp <= to && disposition(event) === "blocked" && event.category.includes("network"));
+    if (proof.length && ports.length && ports.every(item => item.key >= 49152) && proof.every(event => {
+      const port = firstNumber(event.rawFields, "source.port", 65535);
+      return port !== null && port > 0 && port <= 1024;
+    })) return false;
+    return proof.length > 0;
+  });
+}
+
+export function analyzeLiveScans(raw, context, config, reputations, from, to) {
+  const findings = new Map();
+  for (const bucket of liveScanCandidates(raw, config, from, to)) {
+    const source = ip(bucket.key);
+    const blocked = bucket.proof.hits.hits.map(hit => normalizeEvent(hit, config)).filter(event => event && event.sourceIp === source
+      && event.timestamp >= from && event.timestamp <= to && disposition(event) === "blocked");
+    const accepted = (context?.aggregations?.sources?.buckets || []).filter(item => ip(item.key) === source)
+      .flatMap(item => item.proof.hits.hits).map(hit => normalizeEvent(hit, config))
+      .filter(event => event && event.sourceIp === source && event.timestamp >= from && event.timestamp <= to && disposition(event) === "allowed");
+    const ports = bucket.ports.buckets.map(item => item.key).filter(port => Number.isInteger(port) && port > 0 && port <= 65535);
+    const targets = bucket.targets.buckets.map(item => ip(item.key)).filter(Boolean);
+    const contextDetails = activityContext([...blocked, ...accepted]);
+    const reputation = reputationFor(reputations, "ip", source);
+    addFinding(findings, {
+      category: "scan", title: accepted.length ? "Active probing with accepted network activity" : "Active blocked network probing",
+      indicatorType: "ip", indicator: source, scope: source, behaviorScore: accepted.length ? 90 : 80, confidence: 90,
+      severity: accepted.length ? "high" : "medium", reputation,
+      activity: { ...contextDetails, ports: unique([...ports, ...contextDetails.ports]).sort((a, b) => a - b), targets: unique([...targets, ...contextDetails.targets]), from, to, blockedAttemptsLowerBound: bucket.doc_count,
+        portCountLowerBound: ports.length, targetCountLowerBound: targets.length, countsExact: bucket.doc_count_error_upper_bound === 0 },
+      reasons: [`At least ${bucket.doc_count} blocked network events from this public source between ${from} and ${to}, across at least ${targets.length} targets and ${ports.length} ports.`,
+        ...(contextDetails.infrastructures.length ? [`Evidence infrastructure: ${contextDetails.infrastructures.join(", ")}.`] : []),
+        ...(contextDetails.countries.length ? [`Source GeoIP recorded in evidence: ${contextDetails.countries.join(", ")}.`] : []),
+        ...accepted.map(event => `${event.action || event.outcome} to ${event.destinationIp || "unknown target"}:${event.port || "unknown port"} at ${event.timestamp}.`)],
+      limitations: ["Counts and distinct targets/ports are lower bounds from bounded source buckets, not a complete inventory.",
+        "Blocked fanout is consistent with probing, but configuration faults and legitimate traffic also require analyst review; intent is not proven.",
+        "Evidence is sampled. Accepted activity from the same source in this window is context, not proof that a scanned port was exploited.",
+        "GeoIP, when present, is log-supplied attribution, not proof of the operator's location.",
+        ...(context ? [] : ["Accepted-connection context was unavailable."])]
+    }, [...blocked, ...accepted], config, event => `${proofReason(event)} to ${event.destinationIp || "unknown target"}:${event.port || "unknown port"} via ${event.infrastructure || "unknown infrastructure"}`);
+  }
+  return [...findings.values()].map(({ _eventKeys, ...finding }) => ({ ...finding, eventKeys: [..._eventKeys] }));
+}
+
+export function analyzeSiemAlerts(events, config) {
+  const findings = new Map();
+  for (const event of events) {
+    const severity = firstString(event.rawFields, "kibana.alert.severity");
+    const rule = firstString(event.rawFields, "kibana.alert.rule.name");
+    if (!strings(event.rawFields, "event.kind").includes("alert") || !["high", "critical"].includes(severity) || !rule) continue;
+    const indicator = event.hashes[0] || event.domains[0] || (addressScope(event.sourceIp) === "public" ? event.sourceIp : event.destinationIp) || event.identity;
+    if (!indicator) continue;
+    const type = event.hashes[0] ? "hash" : event.domains[0] ? "domain" : isIP(indicator) ? "ip" : "identity";
+    addFinding(findings, { category: "siem_alert", title: `ELK security alert: ${rule}`, indicatorType: type, indicator,
+      scope: JSON.stringify([rule, event.host, event.infrastructure]), severity, behaviorScore: 85, confidence: 85,
+      activity: activityContext([event]), reasons: [`ELK supplied a ${severity}-severity security alert for rule ${rule} at ${event.timestamp}.`],
+      limitations: ["Severity and rule assessment are supplied by ELK; SOC Watch has not independently proved this alert's conclusion."]
+    }, [event], config);
+  }
+  return [...findings.values()].map(({ _eventKeys, ...finding }) => ({ ...finding, eventKeys: [..._eventKeys] }));
 }

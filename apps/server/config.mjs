@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 
 export const defaults = {
   enabled: false, intervalMinutes: 5, overlapMinutes: 5, maxEventsPerRun: 25000,
-  pageSize: 500, timezone: "Europe/Tirane", baselineDays: 7, retentionDays: 30,
+  pageSize: 500, liveIntervalSeconds: 30, liveWindowMinutes: 5, timezone: "Europe/Tirane", baselineDays: 7, retentionDays: 30,
   indexPattern: "logs-*", timestampField: "@timestamp", infrastructureField: "observer.name",
   autoAlertMinPriority: 80, autoInvestigate: true, huntEnabled: false, query: "", assets: [], accounts: [], exceptions: [],
   scanMinAttempts: 30, scanMinTargets: 5, scanMinPorts: 10, authFailures: 10,
@@ -15,7 +15,7 @@ export function validateConfig(value) {
   if (Object.keys(value).some(key => !allowed.has(key))) throw new Error("Unknown agent setting.");
   for (const [name, min, max] of [["intervalMinutes", 1, 60], ["overlapMinutes", 1, 60],
     ["maxEventsPerRun", 500, 100000], ["pageSize", 100, 1000], ["baselineDays", 3, 90],
-    ["retentionDays", 1, 90], ["autoAlertMinPriority", 0, 100], ["scanMinAttempts", 5, 10000],
+    ["retentionDays", 1, 90], ["liveIntervalSeconds", 30, 300], ["liveWindowMinutes", 1, 15], ["autoAlertMinPriority", 0, 100], ["scanMinAttempts", 5, 10000],
     ["scanMinTargets", 2, 1000], ["scanMinPorts", 3, 1000], ["authFailures", 3, 1000],
     ["beaconMinConnections", 8, 1000], ["exfilMinBytes", 1048576, 1e12], ["exfilRatio", 2, 1000]]) {
     if (!Number.isInteger(c[name]) || c[name] < min || c[name] > max) throw new Error(`Invalid ${name}: expected ${min}-${max}.`);

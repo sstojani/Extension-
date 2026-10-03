@@ -66,7 +66,7 @@ test("relay read grammar rejects writes, scripts, broad queries and system index
 
 test("relay ownership, late/duplicate results, abort, timeout and expiry fail closed", async () => {
   let now = 1000;
-  const relay = new BrowserRelay({ clock: () => now, timeout: 20, ttl: 60 }), client = randomUUID();
+  const relay = new BrowserRelay({ clock: () => now, timeout: 20, queueTimeout: 20, ttl: 60 }), client = randomUUID();
   relay.connect("owner", client, source);
   assert.throws(() => relay.connect("other", randomUUID(), source), /Another browser/);
   const result = relay.execute({ kind: "openPit", indexPattern: "logs-*" });
@@ -117,13 +117,14 @@ test("worker resumes a paginated relay scan, watches indicators and reads proof 
     }
   })();
   try {
-    worker.request("live"); await worker.tick();
+    // Resume a pre-upgrade raw live window; new manual live requests use targeted detection.
+    store.set("scanRequest", { mode: "live" }); await worker.tick(); await worker.tick();
     assert.ok(worker.scan); assert.equal(worker.scan.cursor, null);
     const originalWindow = [worker.scan.from, worker.scan.to];
     assert.equal(store.get(`checkpoint:${worker.scan.scope}`), null);
     elastic.relay.disconnect("session", client); await worker.tick();
     assert.deepEqual([worker.scan.from, worker.scan.to], originalWindow);
-    elastic.relay.connect("session", client, source); await worker.tick();
+    elastic.relay.connect("session", client, source); await worker.tick(); await worker.tick();
     assert.equal(worker.scan, null);
     assert.equal(worker.state().status.coverage.eventsRead, 201); // Physical reads include the replayed first page.
     assert.equal(worker.state().status.coverage.analysisEvents, 101);

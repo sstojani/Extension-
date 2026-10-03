@@ -143,7 +143,7 @@ export async function sendBridgeMessage<TParams, TData>(action: BridgeAction, pa
         requestId: request.requestId,
         success: false,
         error: {
-          code: action.startsWith("threatRadar") || action === "threatIntel.dailyHunt" ? "KIBANA_UNREACHABLE" : "BRIDGE_NOT_INSTALLED",
+          code: action.startsWith("threatRadar") || action.startsWith("agent.relay.") || action === "threatIntel.dailyHunt" ? "KIBANA_UNREACHABLE" : "BRIDGE_NOT_INSTALLED",
           message: action === "threatIntel.dailyHunt"
             ? "IOC Hunt did not return before the five-minute timeout. Check the extension service worker and Kibana response."
             : action.startsWith("threatRadar")
@@ -290,7 +290,7 @@ function sendViaWindowRelay<TParams, TData>(request: BridgeRequest<TParams>): Pr
         requestId: request.requestId,
         success: false,
         error: {
-          code: "BRIDGE_NOT_INSTALLED",
+          code: request.action.startsWith("agent.relay.") ? "KIBANA_UNREACHABLE" : "BRIDGE_NOT_INSTALLED",
           message: request.action === "threatIntel.dailyHunt"
             ? "IOC Hunt did not return before the five-minute timeout. Check the extension service worker and Kibana response."
             : "SOC Watch Bridge page relay did not respond."

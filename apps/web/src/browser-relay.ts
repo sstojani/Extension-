@@ -50,8 +50,8 @@ export async function runBrowserRelay({ api, bridge, policy, signal, onProgress,
         const result = await bridge("agent.relay.execute", { relayId, jobId: job.id, operation });
         if (signal.aborted) break;
         await post("/relay/result", { clientId, id: job.id, success: result.success,
-          ...(result.success ? { data: result.data } : { error: result.error.message }) });
-        if (!result.success) throw new RelayBridgeError(result.error.message, result.error.code);
+          ...(result.success ? { data: result.data } : { error: result.error.message, errorCode: result.error.code }) });
+        if (!result.success && !(operation.kind === "live" && result.error.code === "INVALID_REQUEST")) throw new RelayBridgeError(result.error.message, result.error.code);
       }
     } catch (error) {
       retrying = !(error instanceof RelayBridgeError && ["INVALID_REQUEST", "INVALID_ORIGIN", "KIBANA_FORBIDDEN", "KIBANA_NOT_FOUND", "RESULT_TOO_LARGE"].includes(error.code));

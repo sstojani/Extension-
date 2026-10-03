@@ -95,7 +95,7 @@ export function createAgentApi(worker, runtime, version = "0.15.0") {
       if (route === "config" && request.method === "PUT") {
         const config = validateConfig({ ...worker.config(), ...await readBody(request) });
         if (worker.elastic?.relay && ["indexPattern", "timestampField", "infrastructureField"].some(key => config[key] !== worker.config()[key])) {
-          if (worker.scan || worker.running) throw new Error("Finish the current scan before changing its browser relay scope.");
+          if (worker.scan || worker.running || worker.liveRunning) throw new Error("Stop historical collection and wait for the current live check before changing its browser relay scope.");
           const lease = worker.elastic.relay.lease;
           if (lease) worker.elastic.relay.disconnect(lease.session, lease.clientId);
         }
@@ -105,6 +105,11 @@ export function createAgentApi(worker, runtime, version = "0.15.0") {
       if (route === "scan" && request.method === "POST") {
         worker.request((await readBody(request)).mode);
         void worker.tick(); return json(202, { queued: true });
+      }
+      if (route === "scan/cancel" && request.method === "POST") {
+        if (session.role !== "admin") return json(403, { error: "An administrator token is required to cancel historical collection." });
+        if ((await readBody(request)).confirm !== true) throw new Error("Confirm historical scan cancellation.");
+        worker.cancelScan(); void worker.tick(); return json(202, { queued: true });
       }
       if (route === "rules" && request.method === "POST") {
         const rule = validateRule(await readBody(request));

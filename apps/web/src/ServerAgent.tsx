@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 
 import {
   Activity, AlertTriangle, ArrowLeft, Bell, CheckCircle2, ChevronLeft, ChevronRight,
   FileSearch, LoaderCircle, LogIn, LogOut, Pencil, Play, Plus, RefreshCw, Save, Search,
-  Send, Server, Settings, ShieldCheck, Trash2, X
+  Send, Server, Settings, ShieldCheck, Square, Trash2, X
 } from "lucide-react";
 import "./server-agent.css";
 import { sendBridgeMessage } from "./bridge";
@@ -25,6 +25,7 @@ export type AgentConfig = {
   timestampField: string; infrastructureField: string; autoAlertMinPriority: number;
   retentionDays: number; query: string; assets: unknown[]; accounts: unknown[];
   exceptions?: AgentException[]; autoInvestigate?: boolean; huntEnabled?: boolean;
+  liveIntervalSeconds?: number; liveWindowMinutes?: number;
   scanMinAttempts?: number; scanMinTargets?: number; scanMinPorts?: number; authFailures?: number;
   beaconMinConnections?: number; beaconMaxCv?: number; exfilMinBytes?: number; exfilRatio?: number;
 };
@@ -35,13 +36,18 @@ export type WatchRule = {
   requireSuccess: boolean;
 };
 type Evidence = { eventId: string; index: string; timestamp: string; reason: string };
+type ActivityContext = {
+  infrastructures: string[]; targets: string[]; ports: number[]; countries: string[];
+  from?: string; to?: string; blockedAttemptsLowerBound?: number;
+  allowed: { timestamp: string; action: string | null; destinationIp: string | null; port: number | null; infrastructure: string | null }[];
+};
 export type Finding = {
   id: string; fingerprint: string; title: string; category: string; indicator: string;
   indicatorType: IndicatorType; severity: string; priority: number; behaviorScore: number;
   confidence: number; reputation: {
     verdict: string; score?: number; malicious?: number; suspicious?: number; checkedAt?: string; status?: string;
   } | null; firstSeen: string; lastSeen: string; count: number; evidence: Evidence[];
-  reasons: string[]; limitations: string[]; status: FindingStatus; assignedTo?: string; notes?: unknown;
+  reasons: string[]; limitations: string[]; status: FindingStatus; assignedTo?: string; notes?: unknown; activity?: ActivityContext;
 };
 type Run = {
   id: string; startedAt: string; finishedAt: string | null; mode: string; status: string;
@@ -50,7 +56,7 @@ type Run = {
 };
 type Alert = {
   id: string; title?: string; message?: string; indicator?: string; findingId?: string;
-  createdAt?: string; timestamp?: string; priority?: number;
+  createdAt?: string; timestamp?: string; priority?: number; reasons?: string[]; activity?: ActivityContext;
 };
 type Channel = {
   id: string; name: string; type: "webhook" | "discord" | "telegram";
@@ -71,6 +77,8 @@ export type AgentState = {
     enabled: boolean; configured: boolean; running: boolean; lastSuccess: string | null;
     lastError: unknown; checkpoint: unknown; nextScan: string | null; heartbeat: unknown; coverage: unknown;
     paused?: boolean; dataSource?: { mode: "direct" | "browser_relay"; ready: boolean; source?: { kibanaBaseUrl: string; spaceId: string } | null; lastSeen?: string | null };
+    live?: { running?: boolean; lastSuccess: string | null; lastAttempt?: string; lastError: string | null; nextScan: string | null; from?: string; to?: string; evidenceRead?: number; findings?: number; coverage?: string; stages: Record<string, { status: string; error?: string; matched?: number; evidenceRead?: number }> };
+    historical?: { id: string; mode: string; from: string; to: string; eventsRead: number; totalMatched: number; paused?: boolean } | null;
   };
   config: AgentConfig; rules: WatchRule[]; findings: Finding[]; runs: Run[]; alerts: Alert[];
   deliveries: { id: string; channel: string; status: string; attempts: number; nextAttempt: string | null; error?: string }[];
@@ -172,6 +180,9 @@ export async function agentRequest<T = unknown>(path: string, options: RequestOp
 }
 
 export function validateConfig(config: AgentConfig): string | null {
+  for (const [key, min, max] of [["liveIntervalSeconds", 30, 300], ["liveWindowMinutes", 1, 15]] as const) {
+    if (config[key] !== undefined && (!Number.isInteger(config[key]) || config[key]! < min || config[key]! > max)) return `Invalid ${key}.`;
+  }
   for (const { key, min, max, step } of detectionControls) {
     const value = config[key];
     if (value !== undefined && (!Number.isFinite(value) || value < min || value > max || step === 1 && !Number.isInteger(value))) return `Invalid ${key}.`;
@@ -278,6 +289,15 @@ function coverageIncomplete(coverage: unknown): boolean {
 }
 export function scanHealth(state: AgentState, now = Date.now()): { label: string; detail: string; tone: Tone } {
   if (state.status.dataSource?.mode === "browser_relay" && !state.status.dataSource.ready) return { label: "Collection paused", detail: "No authenticated work browser relay is available. Connect the browser to resume collection. Retained findings and server delivery are preserved.", tone: "error" };
+  const live = state.status.live;
+  if (live?.running) return { label: "Live check running", detail: live.lastError ? `Previous check had reduced coverage: ${live.lastError}` : "Fresh detection is running; current coverage has not yet been confirmed.", tone: "warning" };
+  if (live && !live.lastAttempt) return { label: state.config.enabled ? "Awaiting live check" : "Live monitoring paused", detail: "No live check has completed for the current source and detection settings.", tone: "warning" };
+  if (live?.lastAttempt) {
+    if (live.lastError) return { label: "Live coverage reduced", detail: live.lastError, tone: "error" };
+    if (!state.config.enabled) return { label: "Live monitoring paused", detail: `Last manual check: ${date(live.lastAttempt)}.`, tone: "neutral" };
+    if (now - Date.parse(live.lastAttempt) > Math.max(120000, (state.config.liveIntervalSeconds ?? 30) * 2000)) return { label: "Live check overdue", detail: "Fresh detection has not completed recently. Review the relay and run stages.", tone: "warning" };
+    return { label: "Live checks completed", detail: "Targeted, sampled coverage. Authentication and threat evidence may be incomplete; review stage counts.", tone: "warning" };
+  }
   const latest = [...state.runs].sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt))[0];
   if (state.status.lastError) return { label: "Scan error", detail: message(state.status.lastError), tone: "error" };
   if (latest?.error || latest && /fail|error/.test(latest.status)) return { label: "Last scan failed", detail: latest.error ?? latest.status, tone: "error" };
@@ -339,6 +359,7 @@ export function ServerAgent() {
   const [busy, setBusy] = useState("");
   const [scanMode, setScanMode] = useState<ScanMode>("live");
   const [clearOpen, setClearOpen] = useState(false);
+  const [cancelOpen, setCancelOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [browserEnabled, setBrowserEnabled] = useState(false);
   const [browserError, setBrowserError] = useState("");
@@ -416,7 +437,7 @@ export function ServerAgent() {
             const eligible = fresh.filter(alert => alertTime(alert) >= browserRequestedAt.current);
             try {
               if (eligible.length > 3) new Notification("SOC Watch Server Agent", { body: `${eligible.length} new alerts. Open Findings to review.`, tag: "soc-watch-agent-batch" });
-              else for (const alert of eligible) new Notification(alert.title ?? "SOC Watch server alert", { body: (alert.message ?? alert.indicator ?? "New finding requires review.").slice(0, 240), tag: `soc-watch-agent-${alert.id}` });
+              else for (const alert of eligible) new Notification(alert.title ?? "SOC Watch server alert", { body: [alert.indicator, alert.activity?.infrastructures.join(", "), alert.reasons?.join(" ") || alert.message].filter(Boolean).join(" | ").slice(0, 500), tag: `soc-watch-agent-${alert.id}` });
             } catch (caught) { setBrowserError(`Browser notification failed: ${errorMessage(caught)}`); browserActive.current = false; setBrowserEnabled(false); }
           }
         }
@@ -508,15 +529,22 @@ export function ServerAgent() {
           <section className="sa-status-strip" aria-label="Agent status">
             <div><span>Agent</span><Badge tone={health.tone}>{health.label}</Badge></div>
             <div><span>Heartbeat</span><strong>{date(record(state.status.heartbeat) ? state.status.heartbeat.at ?? state.status.heartbeat.timestamp ?? state.status.heartbeat.lastSeen : state.status.heartbeat)}</strong></div>
-            <div><span>Last success</span><strong>{date(state.status.lastSuccess)}</strong></div>
-            <div><span>Next scan</span><strong>{date(state.status.nextScan)}</strong></div>
-            <div><span>Active findings</span><strong className="sa-number">{count(openCount)}</strong></div>
+            <div><span>Last live success</span><strong>{date(state.status.live?.lastSuccess ?? state.status.lastSuccess)}</strong></div>
+            <div><span>Next live check</span><strong>{state.config.enabled ? date(state.status.live?.nextScan ?? state.status.nextScan) : "Paused"}</strong></div>
+            <div><span>Retained open findings</span><strong className="sa-number">{count(openCount)}</strong></div>
             <div><span>Reputation{state.reputation.configured === false ? " (not configured)" : ""}</span><strong>{count(state.reputation.pending)} pending / {count(state.reputation.unavailable)} unavailable</strong></div>
           </section>
           {health.tone !== "good" && <p className={`sa-feedback sa-${health.tone}`}><Activity size={16} aria-hidden="true" />{health.detail}</p>}
+          <section className="sa-section" aria-label="Live monitoring">
+            <div className="sa-section-heading"><h2><Activity size={18} aria-hidden="true" />Live monitoring</h2><Toggle label="Live monitoring enabled" checked={state.config.enabled} onChange={enabled => void action("monitoring", "/config", { enabled }, "PUT")} disabled={!canAdmin || !!busy} /></div>
+            <dl className="sa-facts"><div><dt>Window</dt><dd>{state.config.liveWindowMinutes ?? 5} minutes</dd></div><div><dt>Interval after check</dt><dd>{state.config.liveIntervalSeconds ?? 30} seconds</dd></div><div><dt>Evidence sampled</dt><dd>{count(state.status.live?.evidenceRead)}</dd></div><div><dt>Coverage</dt><dd>{state.status.live?.coverage ?? "Awaiting first check"}</dd></div></dl>
+            {state.status.live && <details className="sa-details"><summary>Live detection stages</summary><dl className="sa-facts">{Object.entries(state.status.live.stages).map(([stage, result]) => <div key={stage}><dt>{human(stage)}</dt><dd className={result.error ? "sa-error" : ""}>{result.error ?? `${result.status} | ${count(result.matched)} matched | ${count(result.evidenceRead)} proof events`}</dd></div>)}</dl></details>}
+            {state.status.historical && <div className="sa-section-heading"><p className={state.status.historical.paused ? "sa-error" : "sa-muted"}>Historical {state.status.historical.mode}: {count(state.status.historical.eventsRead)} reads / {count(state.status.historical.totalMatched)} matched. {state.status.historical.paused ? "Blocked." : "Background collection."}</p><button type="button" className="sa-button" disabled={!canAdmin || !!busy} onClick={() => setCancelOpen(true)}><Square size={16} aria-hidden="true" />Stop historical scan</button></div>}
+            {!!state.status.lastError && state.status.live?.lastAttempt && <p className="sa-feedback sa-error">Historical/background error: {message(state.status.lastError)}</p>}
+          </section>
           <div className="sa-console-toolbar"><nav className="sa-tabs" aria-label="Console views">{tabs.map(({ name, icon: Icon }) => <button type="button" key={name} className={tab === name ? "sa-active" : ""} aria-current={tab === name ? "page" : undefined} onClick={() => setTab(name)}><Icon size={16} aria-hidden="true" />{name}</button>)}</nav>
             <div className="sa-actions"><select aria-label="Scan mode" value={scanMode} onChange={event => setScanMode(event.target.value as ScanMode)}><option value="live">Live scan</option><option value="today">Today</option><option value="baseline">Baseline</option></select>
-              <button type="button" className="sa-button sa-primary" disabled={!!busy || state.status.running || !state.status.configured || state.status.dataSource?.ready === false} onClick={() => void action("scan", "/scan", { mode: scanMode }).then(ok => { if (ok) setSuccess("Scan queued. Progress will appear in run history."); })}><Play size={16} aria-hidden="true" />{busy === "scan" ? "Queueing..." : "Scan"}</button>
+              <button type="button" className="sa-button sa-primary" disabled={!!busy || scanMode !== "live" && state.status.running || !state.status.configured || state.status.dataSource?.ready === false} onClick={() => void action("scan", "/scan", { mode: scanMode }).then(ok => { if (ok) setSuccess(scanMode === "live" ? "Fresh live check queued." : "Historical collection queued."); })}><Play size={16} aria-hidden="true" />{busy === "scan" ? "Queueing..." : "Scan"}</button>
               <button type="button" className="sa-icon" title="Refresh state" aria-label="Refresh state" disabled={!!busy} onClick={() => setRefresh(value => value + 1)}><RefreshCw size={17} /></button></div>
           </div>
           <div className="sa-view" aria-label={tab}>
@@ -530,6 +558,7 @@ export function ServerAgent() {
       </>}
     </main>
     {authenticated && selected && <FindingInspector key={selected.id} finding={selected} investigation={state?.investigations?.find(item => item.id === selected.id)} api={api} action={action} busy={busy} mutationError={error} onClose={() => setSelectedId(null)} />}
+    {authenticated && canAdmin && cancelOpen && <Modal title="Stop historical collection" onClose={() => setCancelOpen(false)}><p>Stop after the current read returns? Collected proof and findings remain stored. Its checkpoint will not be advanced.</p><Feedback error={error} /><div className="sa-actions"><button className="sa-button" onClick={() => setCancelOpen(false)}>Keep collecting</button><button className="sa-button sa-danger" disabled={!!busy} onClick={() => void action("cancel", "/scan/cancel", { confirm: true }).then(ok => { if (ok) { setCancelOpen(false); setSuccess("Historical cancellation queued. Live monitoring is unchanged."); } })}><Square size={16} aria-hidden="true" />Stop collection</button></div></Modal>}
     {authenticated && canAdmin && clearOpen && <Modal title="Clear active findings" onClose={() => setClearOpen(false)}><p>Resolve and archive {count(openCount)} active findings? Audit history is retained.</p><Feedback error={error} /><div className="sa-actions"><button type="button" className="sa-button" onClick={() => setClearOpen(false)}>Cancel</button><button type="button" className="sa-button sa-danger" disabled={!!busy} onClick={() => void action("clear", "/clear", { confirm: true }).then(ok => { if (ok) { setClearOpen(false); setSuccess("Active findings archived. Audit history retained."); } })}><Trash2 size={16} aria-hidden="true" />{busy === "clear" ? "Clearing..." : "Clear active findings"}</button></div></Modal>}
   </div>;
 }
@@ -580,11 +609,13 @@ function Findings({ state, health, onInspect, onClear, disabled }: {
 }) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("active");
+  const [timeScope, setTimeScope] = useState("recent");
   const [page, setPage] = useState(0);
   const rows = useMemo(() => orderedFindings(state.findings).filter(finding => {
     const matches = filter === "all" || filter === "active" && ["open", "acknowledged"].includes(finding.status) || finding.status === filter;
-    return matches && `${finding.title} ${finding.indicator} ${finding.category} ${finding.assignedTo ?? ""}`.toLowerCase().includes(search.toLowerCase());
-  }), [state.findings, filter, search]);
+    const recent = timeScope === "retained" || !state.status.live || Date.parse(finding.lastSeen) >= Date.now() - (state.config.liveWindowMinutes ?? 5) * 60000;
+    return matches && recent && `${finding.title} ${finding.indicator} ${finding.category} ${finding.assignedTo ?? ""}`.toLowerCase().includes(search.toLowerCase());
+  }), [state.findings, filter, search, timeScope, state.status.live, state.config.liveWindowMinutes]);
   const pages = Math.max(1, Math.ceil(rows.length / 40));
   const current = Math.min(page, pages - 1);
   const runs = [...state.runs].sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt)).slice(0, 12);
@@ -592,10 +623,11 @@ function Findings({ state, health, onInspect, onClear, disabled }: {
     <section aria-label="Findings">
       <div className="sa-section-heading"><h2>Findings <span className="sa-muted">{count(rows.length)}</span></h2><div className="sa-actions">
         <label className="sa-search"><Search size={16} aria-hidden="true" /><input aria-label="Search findings" placeholder="Indicator, title, assignee" value={search} onChange={event => { setSearch(event.target.value); setPage(0); }} /></label>
+        <select aria-label="Finding time scope" value={timeScope} onChange={event => { setTimeScope(event.target.value); setPage(0); }}><option value="recent">Recent {state.config.liveWindowMinutes ?? 5} minutes</option><option value="retained">Retained history</option></select>
         <select aria-label="Finding status filter" value={filter} onChange={event => { setFilter(event.target.value); setPage(0); }}><option value="active">Active</option><option value="all">All statuses</option><option value="open">Open</option><option value="acknowledged">Acknowledged</option><option value="resolved">Resolved</option><option value="false_positive">False positive</option></select>
         <button className="sa-icon sa-danger-text" title="Clear active findings" aria-label="Clear active findings" onClick={onClear} disabled={disabled || !state.findings.some(finding => ["open", "acknowledged"].includes(finding.status))}><Trash2 size={17} /></button>
       </div></div>
-      {rows.length ? <div className="sa-table-wrap" tabIndex={0} role="region" aria-label="Findings ordered by priority"><table className="sa-table sa-findings-table"><thead><tr><th scope="col">Priority</th><th scope="col">Finding / indicator</th><th scope="col">Behavior</th><th scope="col">Confidence</th><th scope="col">Reputation</th><th scope="col">Events</th><th scope="col">Last seen</th><th scope="col">Status / assignee</th></tr></thead>
+      {rows.length ? <div className="sa-table-wrap" tabIndex={0} role="region" aria-label="Findings ordered by priority"><table className="sa-table sa-findings-table"><thead><tr><th scope="col">Priority</th><th scope="col">Finding / indicator</th><th scope="col">Behavior</th><th scope="col">Confidence</th><th scope="col">Reputation</th><th scope="col">Retained proof events</th><th scope="col">Last seen</th><th scope="col">Status / assignee</th></tr></thead>
         <tbody>{rows.slice(current * 40, current * 40 + 40).map(finding => <tr key={finding.id}>
           <td><strong className="sa-number">{count(finding.priority)}</strong><Badge tone={finding.severity === "critical" || finding.severity === "high" ? "error" : finding.severity === "medium" ? "warning" : "neutral"}>{finding.severity}</Badge></td>
           <td><button className="sa-finding-link" onClick={() => onInspect(finding.id)}>{finding.title}</button><code>{finding.indicator}</code><small>{finding.category} / {finding.indicatorType}</small></td>
@@ -648,8 +680,9 @@ function FindingInspector({ finding, investigation, api, action, busy, mutationE
   const currentProofPage = Math.min(proofPage, proofPages - 1);
   return <Modal title={finding.title} onClose={onClose}>
     <div className="sa-inspector-summary"><code>{finding.indicator}</code><Badge>{finding.indicatorType}</Badge><Badge tone={finding.severity === "critical" || finding.severity === "high" ? "error" : "warning"}>{finding.severity}</Badge><Badge>{human(finding.status)}</Badge></div>
-    <dl className="sa-facts"><div><dt>Priority</dt><dd>{finding.priority}</dd></div><div><dt>Behavior score</dt><dd>{finding.behaviorScore}</dd></div><div><dt>Confidence</dt><dd>{finding.confidence}</dd></div><div><dt>Events</dt><dd>{count(finding.count)}</dd></div><div><dt>First seen</dt><dd>{date(finding.firstSeen)}</dd></div><div><dt>Last seen</dt><dd>{date(finding.lastSeen)}</dd></div><div><dt>Category</dt><dd>{finding.category}</dd></div><div><dt>Fingerprint</dt><dd><code>{finding.fingerprint}</code></dd></div></dl>
+    <dl className="sa-facts"><div><dt>Priority</dt><dd>{finding.priority}</dd></div><div><dt>Behavior score</dt><dd>{finding.behaviorScore}</dd></div><div><dt>Confidence</dt><dd>{finding.confidence}</dd></div><div><dt>Retained proof events</dt><dd>{count(finding.count)}</dd></div><div><dt>First seen</dt><dd>{date(finding.firstSeen)}</dd></div><div><dt>Last seen</dt><dd>{date(finding.lastSeen)}</dd></div><div><dt>Category</dt><dd>{finding.category}</dd></div><div><dt>Fingerprint</dt><dd><code>{finding.fingerprint}</code></dd></div></dl>
     <section className="sa-section"><h3>Behavioral reasons</h3>{finding.reasons.length ? <ul className="sa-list">{finding.reasons.map((reason, i) => <li key={i}>{reason}</li>)}</ul> : <p className="sa-muted">No behavioral reasons reported.</p>}</section>
+    {finding.activity && <section className="sa-section"><h3>Observed activity</h3><dl className="sa-facts"><div><dt>Blocked events (lower bound)</dt><dd>{count(finding.activity.blockedAttemptsLowerBound)}</dd></div><div><dt>Infrastructure in proof</dt><dd>{finding.activity.infrastructures.join(", ") || "Not recorded"}</dd></div><div><dt>Source GeoIP in proof</dt><dd>{finding.activity.countries.join(", ") || "Not recorded"}</dd></div><div><dt>Targets</dt><dd>{finding.activity.targets.join(", ") || "Not recorded"}</dd></div><div><dt>Ports</dt><dd>{finding.activity.ports.join(", ") || "Not recorded"}</dd></div><div><dt>Ports 49152-65535</dt><dd>{finding.activity.ports.filter(port => port >= 49152).join(", ") || "None in returned evidence"}</dd></div></dl>{finding.activity.allowed.length > 0 && <><h4>Accepted/allowed activity in the same window</h4><ul className="sa-list">{finding.activity.allowed.map((event, index) => <li key={index}>{date(event.timestamp)} | {event.action || "success"} | {event.destinationIp || "Unknown target"}:{event.port || "Unknown port"} | {event.infrastructure || "Unknown infrastructure"}</li>)}</ul></>}</section>}
     <section className="sa-section"><h3>Reputation</h3>{reputation ? <><div className="sa-actions"><Badge tone={statusTone(reputation.status)}>{human(reputation.status)}</Badge><span>{reputation.verdict || "No verdict reported"}</span></div><dl className="sa-facts"><div><dt>Score</dt><dd>{count(reputation.score)}</dd></div><div><dt>Malicious</dt><dd>{count(reputation.malicious)}</dd></div><div><dt>Suspicious</dt><dd>{count(reputation.suspicious)}</dd></div><div><dt>Checked</dt><dd>{date(reputation.checkedAt)}</dd></div></dl></> : <p className="sa-muted">Reputation unavailable for this finding.</p>}</section>
     <section className="sa-section"><h3>Limitations</h3>{finding.limitations.length ? <ul className="sa-list sa-warning">{finding.limitations.map((limitation, i) => <li key={i}>{limitation}</li>)}</ul> : <p className="sa-muted">No limitations reported.</p>}</section>
     <section className="sa-section"><div className="sa-section-heading"><h3>Investigator</h3><div className="sa-actions">{investigation && <Badge tone={statusTone(investigation.status)}>{human(investigation.status)}</Badge>}<button type="button" className="sa-button" disabled={!!busy || investigation?.status === "pending"} onClick={() => void action("investigate", "/investigate", { findingId: finding.id }).then(ok => { if (ok) setInvestigationQueued(true); })}><FileSearch size={16} aria-hidden="true" />{busy === "investigate" ? "Queueing..." : investigation ? "Investigate again" : "Investigate"}</button></div></div>
@@ -803,8 +836,10 @@ function AgentSettings({ config, status, api, action, busy, canAdmin }: {
       void action("config", "/config", body, "PUT").then(ok => { if (ok) { setDirty(false); setSuccess("Agent settings saved."); } else setError("Settings were not saved. Review the server error above."); });
     } catch (caught) { setError(errorMessage(caught)); }
   };
-  const numeric: { key: keyof Pick<AgentConfig, "intervalMinutes" | "overlapMinutes" | "maxEventsPerRun" | "pageSize" | "baselineDays" | "autoAlertMinPriority" | "retentionDays">; label: string; min: number; max: number }[] = [
-    { key: "intervalMinutes", label: "Scan interval (minutes)", min: 1, max: 60 },
+  const numeric: { key: keyof Pick<AgentConfig, "intervalMinutes" | "overlapMinutes" | "maxEventsPerRun" | "pageSize" | "baselineDays" | "autoAlertMinPriority" | "retentionDays" | "liveIntervalSeconds" | "liveWindowMinutes">; label: string; min: number; max: number }[] = [
+    { key: "liveIntervalSeconds", label: "Live check interval (seconds)", min: 30, max: 300 },
+    { key: "liveWindowMinutes", label: "Live detection window (minutes)", min: 1, max: 15 },
+    { key: "intervalMinutes", label: "Watch/backfill interval (minutes)", min: 1, max: 60 },
     { key: "overlapMinutes", label: "Overlap (minutes)", min: 1, max: 60 },
     { key: "maxEventsPerRun", label: "Maximum events per run", min: 500, max: 100000 },
     { key: "pageSize", label: "Page size", min: 100, max: 1000 },
@@ -814,7 +849,7 @@ function AgentSettings({ config, status, api, action, busy, canAdmin }: {
   ];
   return <>
     <form onSubmit={submit}><fieldset className="sa-form-body" disabled={!canAdmin || !!busy}>
-      <div className="sa-section-heading"><h2>Agent settings</h2><div className="sa-actions">{dirty && <span className="sa-warning">Unsaved changes</span>}<Toggle label="Scheduled scanning" checked={draft.enabled} onChange={enabled => patch({ enabled })} /></div></div>
+      <div className="sa-section-heading"><h2>Agent settings</h2><div className="sa-actions">{dirty && <span className="sa-warning">Unsaved changes</span>}<Toggle label="Live monitoring" checked={draft.enabled} onChange={enabled => patch({ enabled })} /></div></div>
       <div className="sa-toggle-group">{typeof draft.autoInvestigate === "boolean" && <Toggle label="Automatic investigation" checked={draft.autoInvestigate} onChange={autoInvestigate => patch({ autoInvestigate })} />}{typeof draft.huntEnabled === "boolean" && <Toggle label="Feed hunting" checked={draft.huntEnabled} onChange={huntEnabled => patch({ huntEnabled })} />}</div>
       {status.dataSource?.mode === "browser_relay" && <KibanaDataViewPicker onSelect={scope => patch(scope)} />}
       <div className="sa-form-grid sa-settings-grid">

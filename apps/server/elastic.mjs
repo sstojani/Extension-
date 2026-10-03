@@ -1,6 +1,6 @@
 import { INDICATOR_FIELDS } from "./intelligence.mjs";
 import { BrowserRelay } from "./relay.mjs";
-import { relayFieldCapsPath } from "@soc-watch/protocol";
+import { relayFieldCapsPath, relayLiveSearch, relayIndexAllowed } from "@soc-watch/protocol";
 
 export class ElasticClient {
   constructor(runtime, fetcher = fetch) { this.runtime = runtime; this.fetch = fetcher; this.relay = runtime.dataSource === "browser_relay" ? new BrowserRelay() : null; }
@@ -27,9 +27,9 @@ export class ElasticClient {
       method, headers: { authorization: `ApiKey ${this.runtime.elasticApiKey}`, "content-type": "application/json" },
       ...(body ? { body: JSON.stringify(body) } : {}), signal: this.signal ? AbortSignal.any([this.signal, AbortSignal.timeout(30000)]) : AbortSignal.timeout(30000), redirect: "error"
     });
-    if (!response.ok) throw new Error(response.status === 401 || response.status === 403
+    if (!response.ok) throw Object.assign(new Error(response.status === 401 || response.status === 403
       ? `Elasticsearch authentication/permissions failed (HTTP ${response.status}).`
-      : `Elasticsearch returned HTTP ${response.status}.`);
+      : `Elasticsearch returned HTTP ${response.status}.`), { code: response.status === 403 ? "KIBANA_FORBIDDEN" : response.status === 401 ? "KIBANA_AUTH_REQUIRED" : "KIBANA_UNREACHABLE" });
     return response.json();
   }
   async probe(config) {
@@ -64,6 +64,28 @@ export class ElasticClient {
     }
   }
   async closePit(id) { try { await this.request("/_pit", { id }, "DELETE"); } catch { /* Expired PITs are already released by Elasticsearch. */ } }
+  async live(config, from, to, stage, sources) {
+    const policy = { indexPattern: config.indexPattern, timestampField: config.timestampField, infrastructureField: config.infrastructureField };
+    const operation = { kind: "live", indexPattern: config.indexPattern, from, to, stage, query: config.query, ...(sources ? { sources } : {}) };
+    const template = relayLiveSearch(operation, policy);
+    const body = this.relay ? await this.relay.execute(operation, this.signal)
+      : await this.request(`/${encodeURIComponent(config.indexPattern)}/_search`, template);
+    if (body.timed_out || body._shards?.failed > 0) throw new Error(`Live ${stage} query was incomplete; findings from this response were not promoted.`);
+    if (!body.aggregations || !Number.isSafeInteger(body.hits?.total?.value) || body.hits.total.relation !== "eq") throw new Error(`Invalid live ${stage} response.`);
+    const hitLists = stage === "security" ? [body.aggregations.signals?.proof?.hits?.hits,
+      ...(body.aggregations.authentication?.users?.buckets || []).map(bucket => bucket.proof?.hits?.hits)]
+      : (body.aggregations.sources?.buckets || []).map(bucket => bucket.proof?.hits?.hits);
+    if (hitLists.some(hits => !Array.isArray(hits)) || hitLists.flat().length > 500
+      || hitLists.flat().some(hit => !hit || typeof hit._id !== "string" || !relayIndexAllowed(hit._index, config.indexPattern))) throw new Error(`Malformed live ${stage} evidence.`);
+    if (stage !== "security" && !Array.isArray(body.aggregations.sources?.buckets)) throw new Error(`Missing live ${stage} source buckets.`);
+    if (stage === "security" && !Array.isArray(body.aggregations.authentication?.users?.buckets)) throw new Error("Missing live authentication buckets.");
+    const buckets = stage === "security" ? body.aggregations.authentication.users.buckets : body.aggregations.sources.buckets;
+    const validCount = value => Number.isSafeInteger(value) && value >= 0;
+    if (buckets.length > (stage === "security" ? 20 : 32) || buckets.some(bucket => !validCount(bucket.doc_count)
+      || (stage === "scans" && [bucket.ports, bucket.targets].some(terms => !Array.isArray(terms?.buckets) || terms.buckets.length > 128
+        || terms.buckets.some(item => !validCount(item.doc_count)))))) throw new Error(`Malformed live ${stage} aggregation counts.`);
+    return { ...body, hitsRead: hitLists.flat().length };
+  }
   async watched(config, rule, from, to) {
     const fields = INDICATOR_FIELDS[rule.indicatorType];
     const should = fields.map(field => ({ term: { [field]: rule.indicatorType === "ip" ? rule.indicatorValue : { value: rule.indicatorValue, case_insensitive: true } } }));

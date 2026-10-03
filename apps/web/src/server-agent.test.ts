@@ -32,6 +32,19 @@ it("never reports healthy or running collection for a disconnected browser relay
   snapshot.status.dataSource = { mode: "browser_relay", ready: false };
   expect(scanHealth(snapshot, Date.parse(at))).toMatchObject({ label: "Collection paused", tone: "error" });
 });
+it("keeps live status distinct from failed historical collection and detects stale live checks", () => {
+  const snapshot = state();
+  snapshot.status.lastError = "Historical search HTTP 403";
+  snapshot.status.live = { lastAttempt: at, lastSuccess: at, nextScan: at, lastError: null, stages: {}, coverage: "sampled" };
+  expect(scanHealth(snapshot, Date.parse(at))).toMatchObject({ label: "Live checks completed", tone: "warning" });
+  expect(scanHealth(snapshot, Date.parse(at) + 121000).label).toBe("Live check overdue");
+  snapshot.status.live.lastError = "security: HTTP 403";
+  expect(scanHealth(snapshot, Date.parse(at))).toMatchObject({ label: "Live coverage reduced", tone: "error" });
+  snapshot.status.live.running = true;
+  expect(scanHealth(snapshot, Date.parse(at)).label).toBe("Live check running");
+  snapshot.status.live = { lastSuccess: null, nextScan: null, lastError: null, stages: {} };
+  expect(scanHealth(snapshot, Date.parse(at))).toMatchObject({ label: "Awaiting live check", tone: "warning" });
+});
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("server agent transport", () => {

@@ -6,8 +6,9 @@ import { createAgentApi } from "../api.mjs";
 
 test("API fails closed: login, cookie authentication, CSRF and redacted runtime secrets", async () => {
   const store = new Store(":memory:");
-  const worker = { store, configured: () => true, state: () => ({ secret: false }), config: () => ({}) };
-  const runtime = { token: "a".repeat(40), publicOrigin: "" };
+  let cancelled = 0;
+  const worker = { store, configured: () => true, state: () => ({ secret: false }), config: () => ({}), cancelScan: () => { cancelled++; }, tick: async () => {} };
+  const runtime = { token: "a".repeat(40), analysts: [{ name: "reviewer", token: "b".repeat(40) }], publicOrigin: "" };
   const api = createAgentApi(worker, runtime);
   const server = createServer(async (req,res) => { if (!await api(req,res)) { res.statusCode = 404; res.end(); } });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -21,5 +22,10 @@ test("API fails closed: login, cookie authentication, CSRF and redacted runtime 
     assert.match(login.headers.get("set-cookie"), /HttpOnly; SameSite=Strict/);
     assert.equal((await fetch(`${base}/state`, { headers: { cookie } })).status, 200);
     assert.equal((await fetch(`${base}/config`, { method: "PUT", headers: { cookie, "content-type": "application/json", origin: "https://evil.com" }, body: "{}" })).status, 403);
+    const cancel = (session, body) => fetch(`${base}/scan/cancel`, { method: "POST", headers: { cookie: session, "content-type": "application/json", origin }, body: JSON.stringify(body) });
+    assert.equal((await cancel(cookie, {})).status, 400); assert.equal(cancelled, 0);
+    assert.equal((await cancel(cookie, { confirm: true })).status, 202); assert.equal(cancelled, 1);
+    const analyst = await fetch(`${base}/login`, { method: "POST", headers: { "content-type": "application/json", origin }, body: JSON.stringify({ token: runtime.analysts[0].token }) });
+    assert.equal((await cancel(analyst.headers.get("set-cookie").split(";")[0], { confirm: true })).status, 403); assert.equal(cancelled, 1);
   } finally { await new Promise(resolve => server.close(resolve)); store.close(); }
 });

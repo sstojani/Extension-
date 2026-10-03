@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { relaySourceSchema, validateRelayOperation, RELAY_MAX_BYTES } from "@soc-watch/protocol";
 
 export class BrowserRelay {
-  constructor({ clock = Date.now, ttl = 60000, timeout = 55000 } = {}) {
-    this.clock = clock; this.ttl = ttl; this.timeout = timeout; this.jobs = new Map(); this.lease = null;
+  constructor({ clock = Date.now, ttl = 60000, timeout = 55000, queueTimeout = 120000 } = {}) {
+    this.clock = clock; this.ttl = ttl; this.timeout = timeout; this.queueTimeout = queueTimeout; this.jobs = new Map(); this.lease = null;
   }
   status() {
     const ready = Boolean(this.lease && this.lease.expiresAt > this.clock());
@@ -25,9 +25,11 @@ export class BrowserRelay {
   poll(session, clientId) {
     const lease = this.require(session, clientId);
     lease.expiresAt = this.clock() + this.ttl; lease.lastSeen = new Date(this.clock()).toISOString();
-    const job = [...this.jobs.values()].find(job => !job.assigned);
+    const queued = [...this.jobs.values()].filter(job => !job.assigned);
+    const job = queued.find(job => job.operation.kind === "live") || queued[0];
     if (!job) return { job: null };
     job.assigned = true;
+    clearTimeout(job.timer); job.timer = setTimeout(() => { this.jobs.delete(job.id); job.reject(new Error("Browser relay response timed out. Keep the work browser and Server Agent tab open.")); }, this.timeout);
     return { job: { id: job.id, operation: job.operation } };
   }
   result(session, clientId, body) {
@@ -39,7 +41,9 @@ export class BrowserRelay {
     lease.expiresAt = this.clock() + this.ttl; lease.lastSeen = new Date(this.clock()).toISOString();
     clearTimeout(job.timer); this.jobs.delete(job.id);
     if (body.success) job.resolve(body.data);
-    else job.reject(new Error(typeof body.error === "string" ? body.error.slice(0, 1000) : "Browser relay read failed."));
+    else job.reject(Object.assign(new Error(typeof body.error === "string" ? body.error.slice(0, 1000) : "Browser relay read failed."), {
+      code: ["KIBANA_FORBIDDEN", "KIBANA_AUTH_REQUIRED", "INVALID_REQUEST", "KIBANA_NOT_FOUND", "RESULT_TOO_LARGE"].includes(body.errorCode) ? body.errorCode : "KIBANA_UNREACHABLE"
+    }));
     return { accepted: true };
   }
   disconnect(session, clientId) {
@@ -56,7 +60,7 @@ export class BrowserRelay {
       const id = randomUUID();
       const finish = (callback, value) => { signal?.removeEventListener("abort", abort); callback(value); };
       const abort = () => { const job = this.jobs.get(id); if (job) { clearTimeout(job.timer); this.jobs.delete(id); finish(reject, new Error("Browser relay operation cancelled.")); } };
-      const timer = setTimeout(() => { this.jobs.delete(id); finish(reject, new Error("Browser relay response timed out. Keep the work browser and Server Agent tab open.")); }, this.timeout);
+      const timer = setTimeout(() => { this.jobs.delete(id); finish(reject, new Error("Browser relay queue timed out before assignment; coverage was not completed.")); }, this.queueTimeout);
       this.jobs.set(id, { id, operation, assigned: false, timer, resolve: value => finish(resolve, value), reject: error => finish(reject, error) });
       signal?.addEventListener("abort", abort, { once: true });
       if (signal?.aborted) abort();

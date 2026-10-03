@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { normalizeEvent, analyzeEvidence, eventIndicators } from "./intelligence.mjs";
+import { normalizeEvent, analyzeEvidence, eventIndicators, liveScanCandidates, analyzeLiveScans, analyzeSiemAlerts, activityContext } from "./intelligence.mjs";
 import { defaults } from "./config.mjs";
 import { enrichQueue, publicIndicator } from "./reputation.mjs";
 import { excluded, recordAlert, deliverQueue } from "./alerts.mjs";
@@ -26,37 +26,90 @@ export class AgentWorker {
     this.running = false; this.scan = store.get("scan");
     this.status = { running: false, lastSuccess: store.get("lastSuccess"), lastError: null,
       checkpoint: null, heartbeat: null, coverage: null, nextScan: null };
+    this.liveStatus = store.get("liveStatus", { lastSuccess: null, lastError: null, nextScan: null, stages: {} });
   }
   config() { return { ...defaults, ...this.store.get("config", {}) }; }
+  liveScope(config = this.config()) {
+    const operational = new Set(["enabled", "intervalMinutes", "overlapMinutes", "maxEventsPerRun", "pageSize", "liveIntervalSeconds", "retentionDays", "autoInvestigate", "huntEnabled"]);
+    const policy = Object.keys(defaults).sort().filter(key => !operational.has(key)).map(key => [key, config[key]]);
+    const source = this.elastic.relay ? this.store.get("relaySource") || this.elastic.sourceIdentity?.() : this.elastic.sourceIdentity?.() ?? this.runtime.elasticUrl;
+    return createHash("sha256").update(JSON.stringify([source, policy])).digest("hex");
+  }
   configured() { return this.runtime.dataSource === "browser_relay" || Boolean(this.runtime.elasticUrl && this.runtime.elasticApiKey); }
   ready() { return this.elastic.ready ? this.elastic.ready() : this.configured(); }
   request(mode = "live") {
     if (!["live", "today", "baseline"].includes(mode)) throw new Error("Invalid scan mode.");
     if (!this.configured()) throw new Error("Configure server read-only Elasticsearch credentials first.");
     if (!this.ready()) throw new Error("Browser relay is disconnected. Connect your authenticated work browser first.");
+    if (mode === "live" && this.elastic.live) {
+      this.store.set("liveRequest", true); this.store.audit("live.requested", {}); return;
+    }
     if (this.scan || this.store.get("scanRequest")) throw new Error("A scan is already queued or running.");
     this.store.set("scanRequest", { mode, requestedAt: this.clock() });
     this.store.audit("scan.requested", { mode });
   }
-  start() { this.timer = setInterval(() => void this.tick(), 20000); this.timer.unref(); void this.tick(); }
-  async stop() { this.stopping = true; clearInterval(this.timer); this.shutdown.abort(); while (this.running) await new Promise(resolve => setTimeout(resolve, 50)); }
+  cancelScan() {
+    this.store.set("cancelScan", true); this.store.set("scanRequest", null);
+    this.store.audit("scan.cancel_requested", { id: this.scan?.id });
+  }
+  async finishCancelledScan() {
+    if (!this.store.get("cancelScan")) return;
+    if (this.scan) {
+      const scan = this.scan;
+      this.store.record("run", { ...scan, cursor: undefined, config: undefined, status: "cancelled", coverage: "incomplete", finishedAt: this.clock(), error: undefined });
+      this.scan = null; this.store.set("scan", null);
+      if (scan.cursor?.pit && this.ready()) await this.elastic.closePit(scan.cursor.pit);
+    }
+    this.store.set("cancelScan", false); this.status.lastError = null;
+  }
+  start() {
+    this.timer = setInterval(() => void this.tick(), 10000); this.timer.unref();
+    this.liveTimer = setInterval(() => void this.liveTick(), 10000); this.liveTimer.unref(); void this.tick();
+  }
+  async stop() { this.stopping = true; clearInterval(this.timer); clearInterval(this.liveTimer); this.shutdown.abort(); while (this.running || this.liveRunning) await new Promise(resolve => setTimeout(resolve, 50)); }
+  async liveTick() {
+    const config = this.config(), now = this.clock();
+    const scopeKey = this.liveScope(config), currentScope = this.liveStatus.scopeKey === scopeKey;
+    if (!this.elastic.live || this.liveRunning || this.stopping || !this.ready()
+      || !this.store.get("liveRequest") && !((config.enabled || this.store.get("liveRetry")) && (!currentScope || !this.liveStatus.nextScan || this.liveStatus.nextScan <= now))) return;
+    this.liveRunning = true;
+    try { await this.liveWindow(config, now); }
+    catch (error) {
+      if (error.code === "LIVE_POLICY_CHANGED") { this.store.set("liveRequest", true); this.store.audit("live.policy_changed", {}); return; }
+      this.liveStatus = { ...(currentScope ? this.liveStatus : { lastSuccess: null, stages: {} }), scopeKey, lastAttempt: now, lastError: error.message, coverage: "reduced",
+        nextScan: new Date(Date.parse(this.clock()) + config.liveIntervalSeconds * 1000).toISOString() };
+      this.store.set("liveStatus", this.liveStatus); this.store.audit("live.failed", { error: error.message });
+    } finally { this.liveRunning = false; }
+  }
+  async deliver() {
+    if (this.delivering) return;
+    this.delivering = true;
+    try { await deliverQueue(this.store, this.store.get("notifications", { channels: [] }), this.fetcher, this.clock()); }
+    finally { this.delivering = false; }
+  }
   async tick() {
     if (this.running || this.stopping) return;
     this.running = true; this.status.running = true; this.status.heartbeat = this.clock();
     try {
       const config = this.config(), now = this.clock();
+      await this.finishCancelledScan();
+      void this.liveTick();
+      // Deliver fresh evidence before historical reads, investigation or feed backfill.
+      await this.deliver();
       const request = this.store.get("scanRequest");
       try {
-        if (this.ready() && (this.scan || request || (config.enabled && this.configured() && (!this.status.nextScan || this.status.nextScan <= now)))) await this.scanWindow(config, request?.mode || "live", now);
+        if (this.ready() && !this.scan?.paused && (this.scan || request || (!this.elastic.live && config.enabled && this.configured() && (!this.status.nextScan || this.status.nextScan <= now)))) await this.scanWindow(config, request?.mode || "live", now);
       } catch (error) {
         this.status.lastError = error.message;
         if (this.scan) {
-          this.store.record("run", { ...this.scan, cursor: undefined, config: undefined, status: "retrying", error: error.message });
+          this.scan.paused = ["KIBANA_FORBIDDEN", "INVALID_REQUEST", "KIBANA_NOT_FOUND", "RESULT_TOO_LARGE"].includes(error.code);
+          this.store.record("run", { ...this.scan, cursor: undefined, config: undefined, status: this.scan.paused ? "blocked" : "retrying", error: error.message, errorCode: error.code });
           if (this.scan.cursor?.pit) await this.elastic.closePit(this.scan.cursor.pit);
           this.scan.cursor = null; this.store.set("scan", this.scan);
         }
         if (!this.stopping && this.ready()) await this.watchRules(config, new Date(Date.parse(now) - config.intervalMinutes * 60000).toISOString(), now);
       }
+      await this.finishCancelledScan();
       if (this.stopping) return;
       if (this.ready() && this.store.get("watchPending", 0) > 0 && this.store.get("watchLastAttempt") !== now) {
         await this.watchRules(config, new Date(Date.parse(now) - config.intervalMinutes * 60000).toISOString(), now);
@@ -64,14 +117,96 @@ export class AgentWorker {
       const enrichment = await enrichQueue(this.store, this.runtime, this.fetcher, this.clock());
       if (enrichment.changed?.length) this.reconsiderIndicators(enrichment.changed, this.config(), this.clock());
       if (this.stopping) return;
-      if (this.ready()) { try { await this.investigationQueue(); } catch (error) { this.store.audit("investigation.failed", { error: error.message }); } }
+      await this.deliver();
+      if (this.ready() && !this.scan && !this.store.get("liveRequest")) { try { await this.investigationQueue(); } catch (error) { this.store.audit("investigation.failed", { error: error.message }); } }
       if (this.stopping) return;
-      if (config.huntEnabled && this.ready()) { try { await this.huntTick(config, now); } catch (error) { this.store.audit("hunt.failed", { error: error.message }); } }
-      await deliverQueue(this.store, this.store.get("notifications", { channels: [] }), this.fetcher, this.clock());
+      if (config.huntEnabled && this.ready() && !this.liveRunning) { try { await this.huntTick(config, now); } catch (error) { this.store.audit("hunt.failed", { error: error.message }); } }
+      await this.deliver();
       this.store.prune(new Date(Date.parse(now) - config.retentionDays * 86400000).toISOString());
     } catch (error) {
       this.status.lastError = error.message;
     } finally { this.running = false; this.status.running = false; this.status.heartbeat = this.clock(); }
+  }
+  saveFindings(findings, config, now) {
+    const notifications = this.store.get("notifications", { channels: [], cooldownMinutes: 60 });
+    for (const finding of findings) {
+      if (excluded(finding, config, Date.parse(now))) continue;
+      const saved = this.store.upsertFinding(finding);
+      if (config.autoInvestigate && saved.priority >= 70 && !this.store.one("investigation", saved.id)) this.store.record("investigation", { id: saved.id, status: "pending" });
+      if (saved.priority >= config.autoAlertMinPriority && saved.confidence >= 70 && saved.status === "open") recordAlert(this.store, saved, { channels: notifications.channels, cooldownMinutes: notifications.cooldownMinutes, now: this.clock() });
+    }
+  }
+  async liveWindow(config, now) {
+    const from = new Date(Date.parse(now) - config.liveWindowMinutes * 60000).toISOString();
+    const scopeKey = this.liveScope(config);
+    const assertScope = () => {
+      if (this.liveScope() !== scopeKey) throw Object.assign(new Error("Live detection policy changed during the check."), { code: "LIVE_POLICY_CHANGED" });
+    };
+    const stages = {}, failures = [];
+    let raw, context, hitsRead = 0, findings = 0;
+    const run = { id: randomUUID(), mode: "live_detection", startedAt: now, from, to: now, invalidEvents: 0 };
+    this.store.set("liveRequest", false);
+    const read = async (stage, sources) => {
+      try {
+        assertScope();
+        const result = await this.elastic.live(config, from, now, stage, sources);
+        assertScope();
+        hitsRead += result.hitsRead;
+        stages[stage] = { status: "sampled", matched: result.hits.total.value, evidenceRead: result.hitsRead };
+        return result;
+      } catch (error) {
+        if (error.code === "LIVE_POLICY_CHANGED") throw error;
+        stages[stage] = { status: "failed", error: error.message, errorCode: error.code };
+        failures.push(`${stage}: ${error.message}`);
+        this.store.audit("live.stage_failed", { stage, error: error.message, code: error.code });
+        return null;
+      }
+    };
+    raw = await read("scans");
+    if (raw) {
+      const sources = liveScanCandidates(raw, config, from, now).map(bucket => bucket.key);
+      if (sources.length && this.ready()) context = await read("context", sources);
+      const detected = analyzeLiveScans(raw, context, config, this.store.reputationMap(), from, now);
+      const proof = [...raw.aggregations.sources.buckets.filter(bucket => sources.includes(bucket.key)), ...(context?.aggregations.sources.buckets || [])]
+        .flatMap(bucket => bucket.proof.hits.hits).map(hit => normalizeEvent(hit, config)).filter(Boolean).map(event => ({ ...event, sampled: true }));
+      this.store.transaction(() => { this.store.addEvents(proof); this.queueIndicators(proof); this.saveFindings(detected, config, now); });
+      findings += detected.length;
+      await this.deliver();
+    }
+    const security = this.ready() ? await read("security") : null;
+    if (!security) {
+      if (!stages.security) { stages.security = { status: "failed", error: "Browser relay became unavailable before the security stage." }; failures.push(stages.security.error); }
+    } else {
+      const proof = [...security.aggregations.authentication.users.buckets.flatMap(bucket => bucket.proof.hits.hits), ...security.aggregations.signals.proof.hits.hits]
+        .map(hit => normalizeEvent(hit, config)).filter(event => event && event.timestamp >= from && event.timestamp <= now).map(event => ({ ...event, sampled: true }));
+      const report = analyzeEvidence(proof, { config, reputations: this.store.reputationMap(), baselines: this.store.get("baselines", {}), now });
+      report.findings.push(...analyzeSiemAlerts(proof, config));
+      for (const finding of report.findings) {
+        finding.activity = activityContext(proof.filter(event => finding.eventKeys.includes(JSON.stringify([event.index, event.id]))));
+        finding.limitations.push("Live security evidence is sampled; this is not complete authentication, C2 or endpoint coverage.");
+      }
+      const involved = new Set(report.findings.flatMap(finding => finding.eventKeys));
+      this.store.transaction(() => {
+        this.store.addEvents(proof);
+        this.queueIndicators(proof.filter(event => involved.has(JSON.stringify([event.index, event.id]))));
+        this.saveFindings(report.findings, config, now);
+      });
+      findings += report.findings.length;
+      stages.security.omittedUsers = security.aggregations.authentication.users.sum_other_doc_count;
+      stages.security.signalMatched = security.aggregations.signals.doc_count;
+    }
+    assertScope();
+    this.liveStatus = { scopeKey, lastSuccess: failures.length ? (this.liveStatus.scopeKey === scopeKey ? this.liveStatus.lastSuccess : null) : this.clock(),
+      lastAttempt: now, lastError: failures.length ? failures.join(" | ") : null,
+      nextScan: new Date(Date.parse(this.clock()) + config.liveIntervalSeconds * 1000).toISOString(),
+      from, to: now, stages, evidenceRead: hitsRead, findings, coverage: failures.length ? "reduced" : "sampled" };
+    this.store.set("liveStatus", this.liveStatus);
+    this.store.set("liveRetry", Object.values(stages).some(stage => stage.status === "failed" && !["KIBANA_FORBIDDEN", "INVALID_REQUEST", "KIBANA_NOT_FOUND", "RESULT_TOO_LARGE"].includes(stage.errorCode)));
+    this.store.record("run", { ...run, status: failures.length ? "reduced" : "complete", finishedAt: this.clock(), eventsRead: hitsRead,
+      totalMatched: stages.scans?.matched || 0, coverage: failures.length ? "reduced" : "targeted_sample", findings, stages,
+      ...(failures.length ? { error: failures.join(" | ") } : {}) });
+    this.store.set("watchPending", this.store.list("rule").filter(rule => rule.enabled).length);
+    await this.deliver();
   }
   async scanWindow(config, mode, now) {
     const source = this.elastic.sourceIdentity ? this.elastic.sourceIdentity() : this.runtime.elasticUrl;
@@ -96,7 +231,8 @@ export class AgentWorker {
     if (scan.source !== undefined && scan.source !== source) throw new Error("The scan belongs to a different data source. Reconnect the original browser source.");
     const tickStarted = Date.now();
     let readThisTick = 0;
-    while (readThisTick < scan.config.maxEventsPerRun && Date.now() - tickStarted < 20000 && !this.stopping) {
+    const budget = this.elastic.live ? Math.min(scan.config.pageSize, scan.config.maxEventsPerRun) : scan.config.maxEventsPerRun;
+    while (readThisTick < budget && Date.now() - tickStarted < 20000 && !this.stopping && !this.store.get("cancelScan")) {
       const page = await this.elastic.page({ ...scan.config, pageSize: Math.min(scan.config.pageSize, scan.config.maxEventsPerRun - readThisTick) }, scan.from, scan.to, scan.cursor);
       const events = page.hits.map(hit => normalizeEvent(hit, scan.config)).filter(Boolean);
       const next = { ...scan };
@@ -111,6 +247,7 @@ export class AgentWorker {
       });
       Object.assign(scan, next);
       readThisTick += page.hits.length; this.status.heartbeat = this.clock();
+      if (this.store.get("cancelScan")) return;
       if (!page.complete) continue;
       await this.elastic.closePit(page.cursor.pit);
       const capabilities = await this.elastic.probe(scan.config).catch(error => ({ error: error.message }));
@@ -132,7 +269,8 @@ export class AgentWorker {
       this.scan = null;
       return;
     }
-    const through = scan.cursor.after?.[0];
+    if (this.store.get("cancelScan")) return;
+    const through = scan.cursor?.after?.[0];
     const analysisTo = typeof through === "number" ? new Date(through).toISOString() : typeof through === "string" && Number.isFinite(Date.parse(through)) ? new Date(through).toISOString() : scan.to;
     const analysis = this.investigate(scan.config, analysisTo, scan.analysisFrom || scan.from);
     scan.analysisFrom = analysisTo; scan.analysisTruncated ||= analysis.truncated;
@@ -190,6 +328,7 @@ export class AgentWorker {
         saved.status = "resolved"; saved.resolutionReason = "The latest provider assessment no longer supports this reputation-only finding.";
       }
       this.store.record("finding", saved);
+      if (excluded(saved, config, Date.parse(now))) continue;
       if (saved.category === "watched_indicator") {
         const rule = this.store.one("rule", saved.fingerprint.split("|")[1]);
         if (rule?.enabled && saved.priority >= rule.minPriority) recordAlert(this.store, saved, { rule, channels: notifications.channels, cooldownMinutes: rule.cooldownMinutes, now });
@@ -255,8 +394,9 @@ export class AgentWorker {
     const notifications = this.store.get("notifications", { channels: [], minPriority: config.autoAlertMinPriority, cooldownMinutes: 60 });
     const ready = this.ready();
     return { status: { ...this.status, enabled: config.enabled, configured: this.configured(), running: ready && (Boolean(this.scan) || this.running), paused: !ready,
+      live: { ...(this.liveStatus.scopeKey === this.liveScope(config) ? this.liveStatus : { lastSuccess: null, lastError: null, nextScan: null, stages: {} }), running: Boolean(this.liveRunning) }, historical: this.scan ? { id: this.scan.id, mode: this.scan.mode, from: this.scan.from, to: this.scan.to, eventsRead: this.scan.eventsRead, totalMatched: this.scan.totalMatched, paused: this.scan.paused === true } : null,
       dataSource: this.elastic.relay ? this.elastic.relay.status() : { mode: "direct", ready } }, config,
-      rules: this.store.list("rule"), findings: this.store.list("finding", 2000).sort((a,b) => b.priority - a.priority),
+      rules: this.store.list("rule"), findings: this.store.list("finding", 2000).filter(finding => !excluded(finding, config, Date.parse(this.clock()))).sort((a,b) => b.priority - a.priority),
       alerts: this.store.list("alert", 200), runs: this.store.list("run", 30), deliveries: this.store.deliveries(),
       notifications: { ...notifications, channels: notifications.channels.map(({ url, token, chatId, ...c }) => ({ ...c, configured: Boolean(url || (token && chatId)) })) },
       reputation: { configured: Boolean(this.runtime.gtiKey), pending: reps.filter(r => r.status === "pending").length,

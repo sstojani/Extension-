@@ -1,7 +1,7 @@
 import { z } from "zod";
 import {
   buildQuery, kibanaApiPath, relayPolicySchema, relayIndexAllowed, relaySourceFields,
-  validateRelayOperation, relayFieldCapsPath, relayPitIdSchema, RELAY_MAX_PIT_ID_BYTES, RELAY_MAX_BYTES, type RelaySource
+  validateRelayOperation, relayFieldCapsPath, relayLiveSearch, relayPitIdSchema, RELAY_MAX_PIT_ID_BYTES, RELAY_MAX_BYTES, type RelaySource
 } from "@soc-watch/protocol";
 import { BridgeOperationError, kibanaFetchJson, readRuntimeConfig } from "./kibana";
 
@@ -139,6 +139,16 @@ export class ServerBrowserRelay {
           const id = snapshotId({ id: raw.pit_id });
           if (id !== operation.body.pit.id) { lease.pits.delete(operation.body.pit.id); lease.pits.add(id); }
         }
+      } else if (operation.kind === "live") {
+        result = await this.read(lease.source, `/${encodeURIComponent(operation.indexPattern)}/_search`, "POST", relayLiveSearch(operation, lease.source.policy), 18000);
+        const inspect = (value: unknown): void => {
+          if (!value || typeof value !== "object") return;
+          if (Array.isArray(value)) { for (const item of value) inspect(item); return; }
+          const object = value as Record<string, unknown>;
+          if (Object.hasOwn(object, "_index") && (typeof object._index !== "string" || !relayIndexAllowed(object._index, lease.source.policy.indexPattern))) throw new Error("Live evidence is outside the authorized log scope.");
+          for (const [key, child] of Object.entries(object)) if (key !== "_source") inspect(child);
+        };
+        inspect(result);
       } else if (operation.kind === "fieldCaps") {
         result = await this.read(lease.source, relayFieldCapsPath(operation.indexPattern, operation.fields), "POST");
       } else {

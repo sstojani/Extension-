@@ -37,11 +37,13 @@ export class Store {
   audit(action, body) { this.db.prepare("INSERT INTO audit(timestamp,action,body) VALUES (?,?,?)").run(new Date().toISOString(), action, JSON.stringify(body)); }
   addEvents(events) {
     const insert = this.db.prepare("INSERT OR IGNORE INTO events VALUES (?,?,?)");
+    const upgrade = this.db.prepare("UPDATE events SET body=? WHERE id=? AND json_extract(body,'$.sampled')=1");
     const indicator = this.db.prepare("INSERT OR IGNORE INTO event_indicators VALUES (?,?,?)");
     let added = 0;
     for (const event of events) {
       const key = JSON.stringify([event.index, event.id]);
       added += Number(insert.run(key, event.timestamp, JSON.stringify(event)).changes);
+      if (!event.sampled) upgrade.run(JSON.stringify(event), key);
       for (const [type, values] of eventIndicators(event)) {
         for (const value of values.filter(Boolean)) indicator.run(type, value.toLowerCase(), key);
       }
@@ -71,11 +73,12 @@ export class Store {
     for (const key of eventKeys) link.run(finding.fingerprint, key);
     const count = this.db.prepare("SELECT COUNT(*) AS count FROM finding_events WHERE finding=?").get(finding.fingerprint).count;
     const { eventKeys: omitted, ...details } = finding;
+    const current = old && finding.lastSeen < old.lastSeen ? old : details;
     return this.record("finding", {
-      ...old, ...details, id: finding.fingerprint, evidence,
+      ...old, ...current, id: finding.fingerprint, evidence,
       firstSeen: old?.firstSeen < finding.firstSeen ? old.firstSeen : finding.firstSeen,
       lastSeen: old?.lastSeen > finding.lastSeen ? old.lastSeen : finding.lastSeen,
-      count, observedEvents: finding.count || finding.events,
+      count, observedEvents: current.observedEvents ?? current.count ?? current.events,
       status: reopens ? "open" : old?.status || "open", assignedTo: old?.assignedTo || "", notes: old?.notes || [],
       reopened: reopens, updatedAt: new Date().toISOString()
     });

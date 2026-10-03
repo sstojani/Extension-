@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { detectBridgeExtension, getExtensionId } from "./bridge";
+import { detectBridgeExtension, getExtensionId, sendBridgeMessage } from "./bridge";
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.useRealTimers(); });
 
 function mockServerPage(versions: string[]) {
   const origin = "https://laptop-1.tail029be8.ts.net";
@@ -37,6 +37,14 @@ function mockServerPage(versions: string[]) {
 }
 
 describe("server-hosted bridge discovery", () => {
+  it.each(["page", "native"])("reports a stalled agent job as a transport failure, not a missing extension (%s)", async transport => {
+    vi.useFakeTimers(); mockServerPage([]);
+    vi.stubGlobal("chrome", transport === "native" ? { runtime: { sendMessage: vi.fn() } } : undefined);
+    if (transport === "native") vi.stubGlobal("localStorage", { getItem: () => "abcdefghijklmnopabcdefghijklmnop" });
+    const response = sendBridgeMessage("agent.relay.execute", {});
+    await vi.advanceTimersByTimeAsync(50000);
+    expect(await response).toMatchObject({ success: false, error: { code: "KIBANA_UNREACHABLE" } });
+  });
   it("uses the relay-reported extension ID instead of a local development ID", async () => {
     mockServerPage(["0.12.5", "0.13.0"]);
     expect(getExtensionId()).toBeUndefined();
