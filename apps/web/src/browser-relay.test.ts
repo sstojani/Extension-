@@ -55,7 +55,7 @@ it("does not register a provider when the extension is absent or the source is i
   expect(progress).toHaveBeenCalledWith({ state: "disconnected", message: "Install Bridge", retrying: true });
 });
 
-it.each(["INVALID_REQUEST", "KIBANA_FORBIDDEN", "INVALID_ORIGIN"] as const)("stops retrying %s failures and cleans up instead of showing a connected button", async code => {
+it.each(["INVALID_REQUEST", "KIBANA_FORBIDDEN", "INVALID_ORIGIN", "KIBANA_NOT_FOUND", "RESULT_TOO_LARGE"] as const)("stops retrying %s failures and cleans up instead of showing a connected button", async code => {
   const controller = new AbortController(), progress = vi.fn(), routes: string[] = [];
   const api = async <T,>(path: string) => { routes.push(path); return {} as T; };
   const bridge = vi.fn(async (): Promise<BridgeResponse<unknown>> => ({ version: 1, requestId: crypto.randomUUID(), success: false, error: { code, message: "Review log settings" } }));

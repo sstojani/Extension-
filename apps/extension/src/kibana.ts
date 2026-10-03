@@ -2685,6 +2685,53 @@ function readSearchTotal(raw: unknown): number {
   return readNumber(asRecord(total).value);
 }
 
+function checkKibanaResponse(path: string, response: {
+  status: number; redirected: boolean; contentType: string; proxyStatus?: string | null;
+}, raw?: unknown): void {
+  if (response.status === 401 || response.redirected || response.contentType.includes("text/html")) {
+    throw new BridgeOperationError("KIBANA_AUTH_REQUIRED", "Kibana authentication is required.");
+  }
+  const url = new URL(path, "https://kibana.invalid");
+  const proxy = url.pathname.endsWith("/api/console/proxy");
+  const payload = asRecord(raw);
+  const errorType = asRecord(payload.error).type;
+  const type = typeof errorType === "string" && /^[a-zA-Z0-9_]{1,100}$/.test(errorType) ? errorType : undefined;
+  const upstream = proxy && response.status >= 200 && response.status < 300;
+  let status = response.status;
+  if (upstream) {
+    // Console keeps the outer HTTP status at 200 even when Elasticsearch rejects the request.
+    if (response.proxyStatus != null) {
+      if (!/^[1-5][0-9]{2}$/.test(response.proxyStatus)) {
+        throw new BridgeOperationError("KIBANA_UNREACHABLE", "Kibana returned an invalid Elasticsearch status header; no read access was confirmed.");
+      }
+      status = Number(response.proxyStatus);
+    }
+    if (payload.error != null && status < 400) {
+      status = Number.isInteger(payload.status) && Number(payload.status) >= 400 && Number(payload.status) <= 599 ? Number(payload.status) : 500;
+    }
+  }
+  if (status >= 200 && status < 300) return;
+  const endpoint = (url.searchParams.get("path") || "").split("?")[0] || "";
+  const operation = endpoint.endsWith("/_pit")
+    ? url.searchParams.get("method") === "DELETE" ? "close a log snapshot" : "open a log snapshot"
+    : endpoint.endsWith("/_field_caps") ? "check log fields"
+    : endpoint.endsWith("/_search") ? "search logs" : "perform this read operation";
+  const details = { status, upstream, ...(type ? { errorType: type } : {}), operation };
+  const failure = `${upstream ? "Elasticsearch" : "Kibana"} rejected the request to ${operation} (HTTP ${status}${type ? `; ${type}` : ""}).`;
+  if (status === 401) throw new BridgeOperationError("KIBANA_AUTH_REQUIRED", `${failure} Sign in to Kibana again.`, details);
+  if (status === 403) throw new BridgeOperationError("KIBANA_FORBIDDEN", `${failure} Use a data view your account can read, or ask your ELK administrator to check its read permissions.`, details);
+  if (status === 429) throw new BridgeOperationError("RATE_LIMITED", `${failure} Retry after Kibana's rate limit clears.`, details);
+  if (upstream && status === 404 && (endpoint === "/_search" || type === "search_context_missing_exception")) {
+    throw new BridgeOperationError("KIBANA_UNREACHABLE", `${failure} The search snapshot is unavailable or expired; reconnect the browser relay.`, details);
+  }
+  if (upstream && [400, 404, 405].includes(status) && operation === "open a log snapshot") {
+    throw new BridgeOperationError("INVALID_REQUEST", `${failure} Check the selected log data view and whether your Elasticsearch cluster supports point-in-time searches (7.10 or newer).`, details);
+  }
+  if (status === 404) throw new BridgeOperationError("KIBANA_NOT_FOUND", `${failure} The endpoint or resource was not found.`, details);
+  if (upstream && [400, 405].includes(status)) throw new BridgeOperationError("INVALID_REQUEST", `${failure} Review the index, fields and query settings.`, details);
+  throw new BridgeOperationError("KIBANA_UNREACHABLE", failure, details);
+}
+
 export async function kibanaFetchJson(config: KibanaRuntimeConfig, path: string, init: RequestInit = {}, limits?: { timeoutMs: number; maxBytes: number }): Promise<unknown> {
   const url = new URL(path, config.kibanaBaseUrl);
   let response: Response;
@@ -2704,15 +2751,10 @@ export async function kibanaFetchJson(config: KibanaRuntimeConfig, path: string,
     return kibanaTabFetchJson(config, path, init, error, limits);
   }
 
-  const contentType = response.headers.get("content-type") ?? "";
-  if (response.status === 401 || response.redirected || contentType.includes("text/html")) {
-    throw new BridgeOperationError("KIBANA_AUTH_REQUIRED", "Kibana authentication is required.");
-  }
-  if (response.status === 403) throw new BridgeOperationError("KIBANA_FORBIDDEN", "The current Kibana user is not permitted to perform this read operation.");
-  if (response.status === 404) throw new BridgeOperationError("KIBANA_NOT_FOUND", "The Kibana endpoint or resource was not found.");
-  if (response.status === 429) throw new BridgeOperationError("RATE_LIMITED", "Kibana rate limited this request.");
-  if (!response.ok) throw new BridgeOperationError("KIBANA_UNREACHABLE", `Kibana returned HTTP ${response.status}.`);
-
+  const metadata = { status: response.status, redirected: response.redirected,
+    contentType: response.headers.get("content-type") ?? "", proxyStatus: response.headers.get("x-console-proxy-status-code") };
+  if (metadata.status === 401 || metadata.redirected || metadata.contentType.includes("text/html")) checkKibanaResponse(path, metadata);
+  let raw: unknown;
   try {
     if (limits) {
       const reader = response.body?.getReader(), chunks: Uint8Array[] = [];
@@ -2728,13 +2770,15 @@ export async function kibanaFetchJson(config: KibanaRuntimeConfig, path: string,
       } finally { reader.releaseLock(); }
       const bytes = new Uint8Array(length); let offset = 0;
       for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
-      return JSON.parse(new TextDecoder().decode(bytes));
-    }
-    return await response.json();
+      raw = JSON.parse(new TextDecoder().decode(bytes));
+    } else raw = await response.json();
   } catch (error) {
     if (error instanceof BridgeOperationError) throw error;
+    checkKibanaResponse(path, metadata);
     throw new BridgeOperationError("KIBANA_UNREACHABLE", "Kibana responded, but the response was not valid JSON.");
   }
+  checkKibanaResponse(path, metadata, raw);
+  return raw;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -2775,8 +2819,8 @@ async function kibanaTabFetchJson(
     status: number;
     redirected: boolean;
     contentType: string;
+    proxyStatus: string | null;
     json: unknown;
-    textPrefix: string;
   }>[] = [];
 
   try {
@@ -2820,8 +2864,8 @@ async function kibanaTabFetchJson(
           status: response.status,
           redirected: response.redirected,
           contentType,
-          json,
-          textPrefix: text.slice(0, 120)
+          proxyStatus: response.headers.get("x-console-proxy-status-code"),
+          json
         };
       },
       args: [path, init.method ?? "GET", typeof init.body === "string" ? init.body : null, limits?.timeoutMs ?? 30000, limits?.maxBytes ?? 32 * 1024 * 1024]
@@ -2843,17 +2887,9 @@ async function kibanaTabFetchJson(
   if (!value) {
     throw new BridgeOperationError("KIBANA_UNREACHABLE", "The open Kibana tab did not return a bridge fetch result.");
   }
-  if (value.status === 401 || value.redirected || value.contentType.includes("text/html")) {
-    throw new BridgeOperationError("KIBANA_AUTH_REQUIRED", "Kibana authentication is required.");
-  }
-  if (value.status === 403) throw new BridgeOperationError("KIBANA_FORBIDDEN", "The current Kibana user is not permitted to perform this read operation.");
-  if (value.status === 404) throw new BridgeOperationError("KIBANA_NOT_FOUND", "The Kibana endpoint or resource was not found.");
-  if (value.status === 429) throw new BridgeOperationError("RATE_LIMITED", "Kibana rate limited this request.");
-  if (!value.ok) throw new BridgeOperationError("KIBANA_UNREACHABLE", `Kibana tab returned HTTP ${value.status}.`);
+  checkKibanaResponse(path, value, value.json);
   if (value.json === null) {
-    throw new BridgeOperationError("KIBANA_UNREACHABLE", "Kibana tab responded, but the response was not valid JSON.", {
-      textPrefix: value.textPrefix
-    });
+    throw new BridgeOperationError("KIBANA_UNREACHABLE", "Kibana tab responded, but the response was not valid JSON.");
   }
   return value.json;
 }

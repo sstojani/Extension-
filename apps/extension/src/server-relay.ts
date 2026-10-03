@@ -36,6 +36,23 @@ function validateTimestamp(raw: unknown, source: RelaySource) {
   }
 }
 
+function snapshotId(raw: unknown): string {
+  const response = raw as { id?: unknown; _shards?: { failed?: number } } | null;
+  if (typeof response?.id !== "string" || !response.id) {
+    throw new BridgeOperationError("KIBANA_UNREACHABLE", "The Elasticsearch snapshot response did not contain a valid ID. This is an unexpected response, not proof of missing read permissions.");
+  }
+  if (response.id.length > 16384) {
+    throw new BridgeOperationError("RESULT_TOO_LARGE", "The Elasticsearch snapshot ID exceeds the bridge limit. Narrow the log index pattern in Agent Settings.");
+  }
+  return response.id;
+}
+
+function validateSnapshot(raw: unknown): void {
+  if ((raw as { _shards?: { failed?: number } } | null)?._shards?.failed) {
+    throw new BridgeOperationError("KIBANA_UNREACHABLE", "Elasticsearch could not open a complete log snapshot because some shards failed. No complete log-read access was confirmed.");
+  }
+}
+
 export class ServerBrowserRelay {
   private lease: { id: string; owner: string; source: RelaySource; expires: number; pits: Set<string> } | undefined;
   private completed = new Map<string, { operation: string; response: Promise<unknown> }>();
@@ -70,9 +87,11 @@ export class ServerBrowserRelay {
       const result = await this.read(source, relayFieldCapsPath(policy.indexPattern, [policy.timestampField]), "POST", undefined, 7000);
       validateTimestamp(result, source);
       // Metadata availability alone does not prove that this user can read log events.
-      const proof = await this.read(source, `/${encodeURIComponent(policy.indexPattern)}/_pit?keep_alive=1m`, "POST", undefined, 7000) as { id?: unknown };
-      if (typeof proof?.id !== "string" || !proof.id || proof.id.length > 16384) throw new Error("Kibana did not confirm log-read permissions.");
-      await this.read(source, "/_pit", "DELETE", { id: proof.id }, 3000);
+      const proof = await this.read(source, `/${encodeURIComponent(policy.indexPattern)}/_pit?keep_alive=1m`, "POST", undefined, 7000);
+      const id = snapshotId(proof);
+      try { validateSnapshot(proof); }
+      catch (error) { await this.read(source, "/_pit", "DELETE", { id }, 3000).catch(() => {}); throw error; }
+      await this.read(source, "/_pit", "DELETE", { id }, 3000);
       this.lease = { id: crypto.randomUUID(), owner, source, expires: this.deps.clock() + 90000, pits: new Set() };
       this.completed.clear();
       return { relayId: this.lease.id, source };
@@ -96,8 +115,9 @@ export class ServerBrowserRelay {
       if (operation.kind === "openPit") {
         if (lease.pits.size >= 8) throw new Error("Too many open relay search snapshots.");
         result = await this.read(lease.source, `/${encodeURIComponent(operation.indexPattern)}/_pit?keep_alive=10m`, "POST");
-        const id = (result as { id?: string })?.id;
-        if (typeof id !== "string" || !id || id.length > 16384) throw new Error("Kibana did not return a search snapshot ID.");
+        const id = snapshotId(result);
+        try { validateSnapshot(result); }
+        catch (error) { await this.read(lease.source, "/_pit", "DELETE", { id }).catch(() => {}); throw error; }
         lease.pits.add(id);
       } else if (operation.kind === "closePit") {
         if (!lease.pits.has(operation.id)) throw new Error("Search snapshot is not owned by this relay.");

@@ -75,6 +75,32 @@ describe("extension server relay", () => {
     request.mockRejectedValueOnce(new Error("Read permission denied"));
     await expect(relay.handle("agent.relay.connect", policy, owner)).rejects.toThrow("Read permission denied");
   });
+  it("does not mislabel malformed snapshot responses as permission denial", async () => {
+    const { relay, request } = fixture();
+    request.mockResolvedValueOnce({ fields: { "@timestamp": { date: { searchable: true } } } });
+    request.mockResolvedValueOnce({});
+    await expect(relay.handle("agent.relay.connect", policy, owner)).rejects.toMatchObject({ code: "KIBANA_UNREACHABLE", message: expect.stringContaining("not proof of missing read permissions") });
+  });
+  it("rejects an oversized snapshot ID as a size/settings problem", async () => {
+    const { relay, request } = fixture();
+    request.mockResolvedValueOnce({ fields: { "@timestamp": { date: { searchable: true } } } });
+    request.mockResolvedValueOnce({ id: "p".repeat(16385) });
+    await expect(relay.handle("agent.relay.connect", policy, owner)).rejects.toMatchObject({ code: "RESULT_TOO_LARGE" });
+  });
+  it("closes an incomplete proof snapshot without authorizing the relay", async () => {
+    const { relay, request } = fixture();
+    request.mockResolvedValueOnce({ fields: { "@timestamp": { date: { searchable: true } } } });
+    request.mockResolvedValueOnce({ id: "partial-pit", _shards: { failed: 1 } });
+    await expect(relay.handle("agent.relay.connect", policy, owner)).rejects.toMatchObject({ code: "KIBANA_UNREACHABLE", message: expect.stringContaining("some shards failed") });
+    expect(JSON.parse(String(request.mock.calls.at(-1)?.[2]?.body))).toEqual({ id: "partial-pit" });
+  });
+  it("preserves the snapshot validation failure if cleanup also fails", async () => {
+    const { relay, request } = fixture();
+    request.mockResolvedValueOnce({ fields: { "@timestamp": { date: { searchable: true } } } });
+    request.mockResolvedValueOnce({ id: "partial-pit", _shards: { failed: 1 } });
+    request.mockRejectedValueOnce(new Error("Cleanup unavailable"));
+    await expect(relay.handle("agent.relay.connect", policy, owner)).rejects.toMatchObject({ code: "KIBANA_UNREACHABLE", message: expect.stringContaining("some shards failed") });
+  });
   it("limits reads to authorized snapshots and indexes, deduplicates job delivery and tracks PIT rotation", async () => {
     const { relay, request } = fixture();
     const connection = await relay.handle("agent.relay.connect", policy, owner) as { relayId: string };

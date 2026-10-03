@@ -54,7 +54,7 @@ export async function runBrowserRelay({ api, bridge, policy, signal, onProgress,
         if (!result.success) throw new RelayBridgeError(result.error.message, result.error.code);
       }
     } catch (error) {
-      retrying = !(error instanceof RelayBridgeError && ["INVALID_REQUEST", "INVALID_ORIGIN", "KIBANA_FORBIDDEN"].includes(error.code));
+      retrying = !(error instanceof RelayBridgeError && ["INVALID_REQUEST", "INVALID_ORIGIN", "KIBANA_FORBIDDEN", "KIBANA_NOT_FOUND", "RESULT_TOO_LARGE"].includes(error.code));
       if (!signal.aborted) onProgress({ state: "disconnected", message: error instanceof Error ? error.message : "Browser relay failed.", retrying });
     } finally {
       // Cleanup must still run after the polling AbortController is cancelled.

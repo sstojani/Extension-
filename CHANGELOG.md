@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.15.2 - 2026-10-03
+
+- Honor Elasticsearch status headers and error bodies inside Kibana Console HTTP 200 responses in both extension fetch paths; report the real operation/status/error type without exposing raw error payloads.
+- Distinguish rejected PIT requests, actual permission denials, expired snapshots, oversized IDs and malformed/incomplete responses; never authorize collection from a failed snapshot check.
+- Stop retrying missing-endpoint and size/configuration failures; retain reconnect recovery for temporary failures and expired snapshots.
+- Add transport-level and browser regressions for denied reads and truthful paused/connected state. The live organization's underlying ELK error still needs deployment verification.
+
 ## 0.15.1 - 2026-10-03
 
 - Use documented field-capabilities URL parameters for browser-relay and direct probes; distinguish missing indexes, unmapped time fields, incompatible mappings, incomplete responses and permissions.

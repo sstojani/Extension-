@@ -40,6 +40,7 @@ try {
     window.fixtureAuthenticated = true;
     window.fixtureSettingsError = true;
     window.fixtureConnections = 0;
+    window.fixturePermissionError = false;
     const rows = Array.from({ length: 120 }, (_, i) => ({ _id: `${i}`, _index: ".ds-logs-network-default-2026.10.02-000001",
       sort: [new Date(Date.now() - 60000).toISOString(), i], _source: { "@timestamp": new Date(Date.now() - 60000).toISOString(),
         "source.ip": "185.220.101.4", "destination.ip": `10.0.0.${i % 10 + 1}`, "destination.port": 22,
@@ -57,6 +58,11 @@ try {
           success: false, error: { code: "INVALID_REQUEST", message: 'Timestamp field "@timestamp" is not mapped in "logs-*". Select your Kibana Discover data view\'s time field in Agent Settings.' } } } }, window.location.origin); return;
       }
       else if (request.action === "agent.relay.disconnect") data = { disconnected: true };
+      else if (request.action === "agent.relay.connect" && window.fixturePermissionError) {
+        window.fixtureConnections++;
+        window.postMessage({ source: "soc-watch-content", message: { type: "soc-watch.response", response: { version: 1, requestId: request.requestId,
+          success: false, error: { code: "KIBANA_FORBIDDEN", message: "Elasticsearch rejected the request to open a log snapshot (HTTP 403; security_exception). Use a data view your account can read, or ask your ELK administrator to check its read permissions." } } } }, window.location.origin); return;
+      }
       else if (!window.fixtureAuthenticated) {
         window.postMessage({ source: "soc-watch-content", message: { type: "soc-watch.response", response: { version: 1, requestId: request.requestId,
           success: false, error: { code: "KIBANA_AUTH_REQUIRED", message: "Kibana authentication is required." } } } }, window.location.origin); return;
@@ -105,9 +111,20 @@ try {
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, "Mobile data-view overflow");
   await page.getByRole("button", { name: "Save settings", exact: true }).click();
   await waitState(state => state.config.indexPattern === "logs-network-*" && state.config.timestampField === "event.created");
-  await page.evaluate(() => { window.fixtureSettingsError = false; });
+  await page.evaluate(() => { window.fixtureSettingsError = false; window.fixturePermissionError = true; });
   await page.getByRole("button", { name: "Findings", exact: true }).click();
   await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.getByRole("button", { name: "Connect this browser", exact: true }).click();
+  await page.getByText("Elasticsearch rejected the request to open a log snapshot", { exact: false }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "Scan", exact: true }).isDisabled(), true);
+  assert.equal(await page.getByRole("button", { name: "Disconnect browser", exact: true }).count(), 0);
+  assert.equal((await page.evaluate(async () => (await (await fetch("/api/agent/state")).json()))).status.dataSource.ready, false);
+  await page.screenshot({ path: resolve(data, "desktop-permission-denied.png"), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: resolve(data, "mobile-permission-denied.png"), fullPage: true });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, "Mobile permission-denial overflow");
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.evaluate(() => { window.fixturePermissionError = false; });
   await page.evaluate(async () => {
     const state = await (await fetch("/api/agent/state")).json();
     const save = await fetch("/api/agent/config", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...state.config, pageSize: 100, autoInvestigate: false }) });
@@ -150,7 +167,7 @@ try {
   await page.getByRole("button", { name: "Connect this browser", exact: true }).waitFor();
   assert.equal((await page.evaluate(async () => (await (await fetch("/api/agent/state")).json()))).status.dataSource.ready, false);
   assert.deepEqual(errors, []);
-  console.log(`Browser relay regression passed: desktop/mobile, settings failures, explicit data-view selection, paginated scan, watch alert, auth loss and automatic recovery. Screenshots: ${data}`);
+  console.log(`Browser relay regression passed: desktop/mobile, settings/permission failures, explicit data-view selection, paginated scan, watch alert, auth loss and automatic recovery. Screenshots: ${data}`);
 } catch (error) {
   await page?.screenshot({ path: resolve(data, "failure.png"), fullPage: true }).catch(() => {});
   console.error(`Browser test failure screenshot: ${data}`);
