@@ -2,7 +2,7 @@
 
 SOC Watch is an internal cybersecurity console for Elastic/Kibana environments. It is split into a Chrome Manifest V3 bridge extension and a separate web application. The bridge reuses the analyst's already-authenticated Kibana browser session through `fetch(..., { credentials: "include" })` without reading, storing, or forwarding cookies or authentication material.
 
-Current product version: `0.15.2`. The Bridge Console verifies the extension. The Server Agent console (`/#server-agent`) can collect through an authenticated work browser relay without an Elasticsearch API key, or use optional direct read-only Elasticsearch credentials. Both display actual coverage/connection state.
+Current product version: `0.15.3`. The Bridge Console verifies the extension. The Server Agent console (`/#server-agent`) can collect through an authenticated work browser relay without an Elasticsearch API key, or use optional direct read-only Elasticsearch credentials. Both display actual coverage/connection state.
 
 ## Workspace
 

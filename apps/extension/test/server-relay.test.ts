@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { RELAY_MAX_PIT_ID_BYTES, RELAY_MAX_BYTES } from "@soc-watch/protocol";
 import { ServerBrowserRelay } from "../src/server-relay";
 
 const policy = { indexPattern: "logs-*", timestampField: "@timestamp", infrastructureField: "observer.name" };
@@ -84,8 +85,49 @@ describe("extension server relay", () => {
   it("rejects an oversized snapshot ID as a size/settings problem", async () => {
     const { relay, request } = fixture();
     request.mockResolvedValueOnce({ fields: { "@timestamp": { date: { searchable: true } } } });
-    request.mockResolvedValueOnce({ id: "p".repeat(16385) });
-    await expect(relay.handle("agent.relay.connect", policy, owner)).rejects.toMatchObject({ code: "RESULT_TOO_LARGE" });
+    request.mockResolvedValueOnce({ id: "p".repeat(RELAY_MAX_PIT_ID_BYTES + 1) });
+    await expect(relay.handle("agent.relay.connect", policy, owner)).rejects.toMatchObject({
+      code: "RESULT_TOO_LARGE", details: { idBytes: RELAY_MAX_PIT_ID_BYTES + 1, maxIdBytes: RELAY_MAX_PIT_ID_BYTES }
+    });
+  });
+  it.each([128 * 1024, RELAY_MAX_PIT_ID_BYTES])("connects, pages, rotates and closes a %i-byte snapshot without changing scope", async size => {
+    const { relay, request } = fixture(), id = "p".repeat(size), rotated = "r".repeat(size);
+    request.mockResolvedValueOnce({ fields: { "@timestamp": { date: { searchable: true } } } });
+    request.mockResolvedValueOnce({ id });
+    request.mockResolvedValueOnce({ succeeded: true });
+    const connection = await relay.handle("agent.relay.connect", policy, owner) as { relayId: string };
+    expect(JSON.parse(String(request.mock.calls[2]?.[2]?.body))).toEqual({ id });
+    const execute = (operation: unknown) => relay.handle("agent.relay.execute", { relayId: connection.relayId, jobId: crypto.randomUUID(), operation }, owner);
+    await expect(execute({ kind: "search", body: { ...body, pit: { ...body.pit, id } } })).rejects.toThrow("not owned");
+    request.mockResolvedValueOnce({ id });
+    await execute({ kind: "openPit", indexPattern: policy.indexPattern });
+    request.mockResolvedValueOnce({ pit_id: rotated, hits: { hits: [] } });
+    await execute({ kind: "search", body: { ...body, pit: { ...body.pit, id } } });
+    expect(JSON.parse(String(request.mock.calls.at(-1)?.[2]?.body)).pit.id).toBe(id);
+    await expect(execute({ kind: "closePit", id })).rejects.toThrow("not owned");
+    request.mockResolvedValueOnce({ hits: { hits: [] } });
+    await execute({ kind: "search", body: { ...body, pit: { ...body.pit, id: rotated } } });
+    await execute({ kind: "closePit", id: rotated });
+    expect(JSON.parse(String(request.mock.calls.at(-1)?.[2]?.body))).toEqual({ id: rotated });
+  });
+  it.each(["", null, 42, "p".repeat(RELAY_MAX_PIT_ID_BYTES + 1), "\u00e9".repeat(RELAY_MAX_PIT_ID_BYTES / 2) + "p"])("rejects malformed or oversized rotated IDs before changing ownership", async id => {
+    const { relay, request } = fixture();
+    const connection = await relay.handle("agent.relay.connect", policy, owner) as { relayId: string };
+    const execute = (operation: unknown) => relay.handle("agent.relay.execute", { relayId: connection.relayId, jobId: crypto.randomUUID(), operation }, owner);
+    await execute({ kind: "openPit", indexPattern: policy.indexPattern });
+    request.mockResolvedValueOnce({ pit_id: id, hits: { hits: [] } });
+    await expect(execute({ kind: "search", body })).rejects.toMatchObject({ code: typeof id === "string" && id.length > 0 ? "RESULT_TOO_LARGE" : "KIBANA_UNREACHABLE" });
+    await execute({ kind: "closePit", id: "pit" });
+  });
+  it("keeps the response limit and does not adopt a rotated ID from oversized evidence", async () => {
+    const { relay, request } = fixture();
+    const connection = await relay.handle("agent.relay.connect", policy, owner) as { relayId: string };
+    const execute = (operation: unknown) => relay.handle("agent.relay.execute", { relayId: connection.relayId, jobId: crypto.randomUUID(), operation }, owner);
+    await execute({ kind: "openPit", indexPattern: policy.indexPattern });
+    request.mockResolvedValueOnce({ pit_id: "pit-2", hits: { hits: [] }, message: "x".repeat(RELAY_MAX_BYTES) });
+    await expect(execute({ kind: "search", body })).rejects.toMatchObject({ code: "RESULT_TOO_LARGE" });
+    await expect(execute({ kind: "closePit", id: "pit-2" })).rejects.toThrow("not owned");
+    await execute({ kind: "closePit", id: "pit" });
   });
   it("closes an incomplete proof snapshot without authorizing the relay", async () => {
     const { relay, request } = fixture();

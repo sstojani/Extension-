@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.15.3 - 2026-10-03
+
+- Replace the restrictive 16 KiB snapshot-ID cap with a shared 1 MiB UTF-8 byte limit across extension, console and server relay validation; keep the saved log scope, 500-record page cap and 8 MiB response limit unchanged.
+- Validate rotated snapshot IDs and response sizes before changing snapshot ownership. Size failures report numeric limits without revealing IDs or implying an authentication failure.
+- Add large-ID connection, pagination, cleanup, byte-boundary and transport regressions, including the production browser/API/worker path with simulated ELK evidence. Live organization connectivity still requires deployment verification.
+
 ## 0.15.2 - 2026-10-03
 
 - Honor Elasticsearch status headers and error bodies inside Kibana Console HTTP 200 responses in both extension fetch paths; report the real operation/status/error type without exposing raw error payloads.

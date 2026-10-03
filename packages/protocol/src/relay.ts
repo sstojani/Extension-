@@ -1,7 +1,10 @@
 import { z } from "zod";
 
 const field = z.string().regex(/^[a-zA-Z0-9.@-][a-zA-Z0-9_.@-]{0,127}$/);
-const pitId = z.string().min(1).max(16384);
+export const RELAY_MAX_PIT_ID_BYTES = 1024 * 1024;
+// PIT IDs are opaque and grow with shard coverage; bound bytes, not index count.
+export const relayPitIdSchema = z.string().min(1).max(RELAY_MAX_PIT_ID_BYTES)
+  .refine(value => new TextEncoder().encode(value).length <= RELAY_MAX_PIT_ID_BYTES, "Snapshot ID exceeds the byte limit");
 export const relayPolicySchema = z.object({
   indexPattern: z.string().min(1).max(512).refine(value => value.split(",").every(part => /^[a-zA-Z0-9_][a-zA-Z0-9_.*-]*$/.test(part))),
   timestampField: field,
@@ -34,11 +37,11 @@ function readQuery(value: unknown, depth = 0, budget = { nodes: 0 }): boolean {
 }
 export const relayOperationSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("openPit"), indexPattern: relayPolicySchema.shape.indexPattern }).strict(),
-  z.object({ kind: z.literal("closePit"), id: pitId }).strict(),
+  z.object({ kind: z.literal("closePit"), id: relayPitIdSchema }).strict(),
   z.object({ kind: z.literal("fieldCaps"), indexPattern: relayPolicySchema.shape.indexPattern, fields: z.array(field).min(1).max(100) }).strict(),
   z.object({ kind: z.literal("evidence"), index: z.string().max(255).regex(/^(?:[a-zA-Z0-9_]|\.ds-)[a-zA-Z0-9_.-]+$/), id: z.string().min(1).max(2048) }).strict(),
   z.object({ kind: z.literal("search"), body: z.object({
-    pit: z.object({ id: pitId, keep_alive: z.literal("10m") }).strict(),
+    pit: z.object({ id: relayPitIdSchema, keep_alive: z.literal("10m") }).strict(),
     size: z.number().int().min(1).max(500), track_total_hits: z.literal(true), timeout: z.literal("20s"),
     query: z.unknown().refine(value => readQuery(value), "Unsupported read query"),
     sort: z.array(z.record(z.unknown())).length(2),

@@ -8,7 +8,7 @@ import { AgentWorker } from "../worker.mjs";
 import { Store } from "../store.mjs";
 import { defaults, runtimeConfig } from "../config.mjs";
 import { createAgentApi } from "../api.mjs";
-import { validateRelayOperation, relayIndexAllowed } from "@soc-watch/protocol";
+import { validateRelayOperation, relayIndexAllowed, RELAY_MAX_PIT_ID_BYTES, RELAY_MAX_BYTES } from "@soc-watch/protocol";
 
 const policy = { indexPattern: "logs-*", timestampField: "@timestamp", infrastructureField: "observer.name" };
 const source = { kibanaBaseUrl: "https://kibana.internal:8888", spaceId: "default", policy };
@@ -140,7 +140,7 @@ test("worker resumes a paginated relay scan, watches indicators and reads proof 
   } finally { working = false; await pump; await worker.stop(); store.close(); }
 });
 
-test("relay API requires a same-origin administrator session, owns jobs and disconnects on logout", async () => {
+test("relay API transports large and rotated PIT IDs, requires an owning administrator and disconnects on logout", async () => {
   const store = new Store(":memory:"), runtime = { ...runtimeConfig({ SOC_WATCH_DATA_SOURCE: "browser_relay" }), token: "a".repeat(40), analysts: [{ name: "analyst", token: "b".repeat(40) }] };
   const elastic = new ElasticClient(runtime);
   const worker = { store, elastic, configured: () => true, state: () => ({}), config: () => ({ ...defaults, ...policy }), tick: async () => {} };
@@ -160,9 +160,31 @@ test("relay API requires a same-origin administrator session, owns jobs and disc
     const { job } = await (await post("relay/poll", { clientId }, cookie)).json();
     const other = await login(runtime.token);
     assert.equal((await post("relay/result", { clientId, id: job.id, success: true, data: { id: "wrong" } }, other)).status, 400);
-    assert.equal((await post("relay/result", { clientId, id: job.id, success: true, data: { id: "pit" } }, cookie)).status, 200);
-    assert.deepEqual(await pending, { id: "pit" });
+    const pit = "p".repeat(RELAY_MAX_PIT_ID_BYTES), rotated = "r".repeat(RELAY_MAX_PIT_ID_BYTES);
+    assert.equal((await post("relay/result", { clientId, id: job.id, success: true, data: { id: pit } }, cookie)).status, 200);
+    assert.deepEqual(await pending, { id: pit });
+    const page = elastic.request("/_search", { ...search.body, pit: { ...search.body.pit, id: pit } });
+    const polled = await (await post("relay/poll", { clientId }, cookie)).json();
+    assert.equal(polled.job.operation.body.pit.id, pit);
+    assert.equal((await post("relay/result", { clientId, id: polled.job.id, success: true, data: { pit_id: rotated, hits: { hits: [] } } }, cookie)).status, 200);
+    assert.equal((await page).pit_id, rotated);
+    const closing = elastic.request("/_pit", { id: rotated }, "DELETE");
+    const cleanup = await (await post("relay/poll", { clientId }, cookie)).json();
+    assert.deepEqual(cleanup.job.operation, { kind: "closePit", id: rotated });
+    assert.equal((await post("relay/result", { clientId, id: cleanup.job.id, success: true, data: { succeeded: true } }, cookie)).status, 200);
+    assert.deepEqual(await closing, { succeeded: true });
     await post("logout", {}, cookie); assert.equal(elastic.ready(), false);
     assert.equal((await post("relay/connect", { clientId, source: { ...source, kibanaBaseUrl: "https://another.internal" } }, other)).status, 400);
   } finally { await new Promise(r => server.close(r)); store.close(); }
+});
+
+test("large PIT support does not remove the result-body limit", async () => {
+  const relay = new BrowserRelay(), client = randomUUID();
+  relay.connect("owner", client, source);
+  const pending = relay.execute({ kind: "openPit", indexPattern: policy.indexPattern });
+  const { job } = relay.poll("owner", client);
+  assert.throws(() => relay.result("owner", client, { id: job.id, success: true, data: { padding: "p".repeat(RELAY_MAX_BYTES) } }), /exceeds/);
+  relay.result("owner", client, { id: job.id, success: false, error: "Response too large" });
+  await assert.rejects(pending, /Response too large/);
+  relay.disconnect("owner", client);
 });

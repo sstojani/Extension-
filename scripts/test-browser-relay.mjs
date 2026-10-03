@@ -41,6 +41,11 @@ try {
     window.fixtureSettingsError = true;
     window.fixtureConnections = 0;
     window.fixturePermissionError = false;
+    window.fixtureRotations = 0;
+    window.fixtureClosedPits = 0;
+    let sequence = 0;
+    const pits = new Set();
+    const newPit = () => `fixture-pit-${++sequence}-`.padEnd(128 * 1024, "p");
     const rows = Array.from({ length: 120 }, (_, i) => ({ _id: `${i}`, _index: ".ds-logs-network-default-2026.10.02-000001",
       sort: [new Date(Date.now() - 60000).toISOString(), i], _source: { "@timestamp": new Date(Date.now() - 60000).toISOString(),
         "source.ip": "185.220.101.4", "destination.ip": `10.0.0.${i % 10 + 1}`, "destination.port": 22,
@@ -57,7 +62,7 @@ try {
         window.postMessage({ source: "soc-watch-content", message: { type: "soc-watch.response", response: { version: 1, requestId: request.requestId,
           success: false, error: { code: "INVALID_REQUEST", message: 'Timestamp field "@timestamp" is not mapped in "logs-*". Select your Kibana Discover data view\'s time field in Agent Settings.' } } } }, window.location.origin); return;
       }
-      else if (request.action === "agent.relay.disconnect") data = { disconnected: true };
+      else if (request.action === "agent.relay.disconnect") { pits.clear(); data = { disconnected: true }; }
       else if (request.action === "agent.relay.connect" && window.fixturePermissionError) {
         window.fixtureConnections++;
         window.postMessage({ source: "soc-watch-content", message: { type: "soc-watch.response", response: { version: 1, requestId: request.requestId,
@@ -66,17 +71,25 @@ try {
       else if (!window.fixtureAuthenticated) {
         window.postMessage({ source: "soc-watch-content", message: { type: "soc-watch.response", response: { version: 1, requestId: request.requestId,
           success: false, error: { code: "KIBANA_AUTH_REQUIRED", message: "Kibana authentication is required." } } } }, window.location.origin); return;
-      } else if (request.action === "agent.relay.connect") data = { relayId: crypto.randomUUID(), source: { kibanaBaseUrl: "https://kibana.internal:8888", spaceId: "default", policy: request.params } };
+      } else if (request.action === "agent.relay.connect") {
+        pits.clear();
+        data = { relayId: crypto.randomUUID(), source: { kibanaBaseUrl: "https://kibana.internal:8888", spaceId: "default", policy: request.params } };
+      }
       else if (request.action === "agent.relay.heartbeat") data = { ready: true };
       else {
         const operation = request.params.operation;
-        if (operation.kind === "openPit") data = { id: "fixture-pit" };
-        else if (operation.kind === "closePit") data = { succeeded: true };
+        if (operation.kind === "openPit") { const id = newPit(); pits.add(id); data = { id }; }
+        else if (operation.kind === "closePit") {
+          if (!pits.delete(operation.id)) throw new Error("Cleanup did not use an owned, current snapshot ID");
+          window.fixtureClosedPits++; data = { succeeded: true };
+        }
         else if (operation.kind === "fieldCaps") data = { fields: Object.fromEntries(operation.fields.map(field => [field, { keyword: { searchable: true } }])) };
         else if (operation.kind === "evidence") data = rows.find(row => row._id === operation.id);
         else {
+          if (!pits.delete(operation.body.pit.id)) throw new Error("Paging did not use an owned, current snapshot ID");
+          const id = newPit(); pits.add(id); window.fixtureRotations++;
           const start = operation.body.search_after ? operation.body.search_after[1] + 1 : 0;
-          data = { hits: { total: { value: rows.length, relation: "eq" }, hits: rows.slice(start, start + operation.body.size) } };
+          data = { pit_id: id, hits: { total: { value: rows.length, relation: "eq" }, hits: rows.slice(start, start + operation.body.size) } };
         }
       }
       window.postMessage({ source: "soc-watch-content", message: { type: "soc-watch.response", response: { version: 1, requestId: request.requestId, success: true, data } } }, window.location.origin);
@@ -141,6 +154,8 @@ try {
   await page.getByRole("button", { name: "Watched indicator observed: Relay watch", exact: true }).first().waitFor();
   const before = await page.evaluate(async () => (await (await fetch("/api/agent/state")).json()));
   assert.equal(before.runs[0].eventsRead, 120); assert.ok(before.alerts.length > 0);
+  assert.ok(await page.evaluate(() => window.fixtureRotations >= 2), "Large snapshot IDs must rotate during pagination");
+  assert.ok(await page.evaluate(() => window.fixtureClosedPits >= 2), "Rotated snapshots must be closed after collection and watch checks");
   await page.screenshot({ path: resolve(data, "desktop-connected.png"), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: resolve(data, "mobile-connected.png"), fullPage: true });
@@ -167,7 +182,7 @@ try {
   await page.getByRole("button", { name: "Connect this browser", exact: true }).waitFor();
   assert.equal((await page.evaluate(async () => (await (await fetch("/api/agent/state")).json()))).status.dataSource.ready, false);
   assert.deepEqual(errors, []);
-  console.log(`Browser relay regression passed: desktop/mobile, settings/permission failures, explicit data-view selection, paginated scan, watch alert, auth loss and automatic recovery. Screenshots: ${data}`);
+  console.log(`Browser relay regression passed: desktop/mobile, settings/permission failures, explicit data-view selection, large/rotated snapshot pagination, watch alert, auth loss and automatic recovery. Screenshots: ${data}`);
 } catch (error) {
   await page?.screenshot({ path: resolve(data, "failure.png"), fullPage: true }).catch(() => {});
   console.error(`Browser test failure screenshot: ${data}`);

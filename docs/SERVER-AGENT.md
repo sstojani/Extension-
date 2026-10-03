@@ -1,4 +1,4 @@
-# Persistent Server Agent (0.15.2)
+# Persistent Server Agent (0.15.3)
 
 ## What Changes
 
@@ -55,12 +55,14 @@ The unit creates `/var/lib/soc-watch` owned by `socwatch` and allows writes only
 
 ## Connect The Work Browser
 
-1. Open the hosted console on the work computer that can reach Kibana. Download Bridge v0.15.2 from the installation page, fully extract it to a permanent folder and load the folder containing `manifest.json` at `chrome://extensions`. Reload the console once.
+1. Open the hosted console on the work computer that can reach Kibana. Download Bridge v0.15.3 from the installation page, fully extract it to a permanent folder and load the folder containing `manifest.json` at `chrome://extensions`. Reload the console once.
 2. Set the correct Kibana URL/space in the Bridge settings and open a signed-in Kibana tab in the same browser profile.
 3. Sign in to Server Agent with an administrator token. In **Agent Settings**, click **Load Kibana data views** and explicitly choose the time-based log view used in Discover, or enter the exact index/time field manually. Selection changes only the draft: review the index, timestamp and infrastructure fields and click **Save settings**, then **Connect this browser**. This explicitly authorizes returning log evidence to the SOC Watch server. Obtain your organization's approval before moving security telemetry to a home-hosted service.
 4. Verify **This browser connected**, run a Live scan, then enable Scheduled scanning in Agent Settings. Both this console tab and the authenticated work browser must remain open.
 
 The console polls bounded server jobs. The extension permits only scoped search snapshots, searches of up to 500 records, field-capability checks and referenced evidence reads. No API key, cookie or password is exported. Source fields and response sizes are bounded. System indexes, writes, scripts and arbitrary endpoints are rejected. Data-stream backing indexes are supported. One authenticated administrator session/tab provides a relay at a time. The database is bound to its first Kibana URL/space to prevent accidental cross-organization mixing; use a separate data directory for another source.
+
+Snapshot IDs are opaque and can grow with shard coverage. Bridge v0.15.3 accepts IDs up to 1 MiB of UTF-8 bytes for connection, paging, rotation and cleanup, replacing the old 16,384-character cap. Responses remain limited to 8 MiB. Install both the updated web build and extension; an older extension still enforces its older limit. Do not narrow `logs-*` just because of the previous cap, or select a data view by its display name alone: inspect its actual index pattern/time field first. If an ID exceeds the new bound, the error reports its byte size and the limit without disclosing the ID. Choosing a narrower raw-log scope is then an explicit coverage tradeoff, never an automatic change.
 
 Changing the saved log index or field scope disconnects the provider and requires explicit reconnection. The administrator token here is SOC Watch's server token, not a requirement for Kibana administrator privileges.
 

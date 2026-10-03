@@ -1,6 +1,6 @@
 import { it, expect, vi } from "vitest";
 import { runBrowserRelay } from "./browser-relay";
-import type { BridgeAction, BridgeResponse } from "@soc-watch/protocol";
+import { RELAY_MAX_PIT_ID_BYTES, type BridgeAction, type BridgeResponse } from "@soc-watch/protocol";
 
 const policy = { indexPattern: "logs-*", timestampField: "@timestamp", infrastructureField: "observer.name" };
 const source = { kibanaBaseUrl: "https://kibana.internal", spaceId: "default", policy };
@@ -22,6 +22,34 @@ it("pumps one authenticated job at a time and disconnects both transports on can
   expect(posts.at(-1)?.signal).toBeUndefined();
   expect(bridge.mock.calls.map(call => call[0])).toEqual(["agent.relay.connect", "agent.relay.execute", "agent.relay.disconnect"]);
   expect(progress).toHaveBeenCalledWith(expect.objectContaining({ state: "connected" }));
+});
+
+it("forwards large snapshot IDs and their rotated cleanup IDs without truncation", async () => {
+  const controller = new AbortController(), id = "p".repeat(RELAY_MAX_PIT_ID_BYTES), rotated = "r".repeat(RELAY_MAX_PIT_ID_BYTES);
+  const operations = [
+    { kind: "search", body: { pit: { id, keep_alive: "10m" }, size: 500, track_total_hits: true, timeout: "20s",
+      query: { bool: { filter: [{ range: { "@timestamp": { gte: "2026-10-03T10:00:00Z", lte: "2026-10-03T10:05:00Z" } } }] } },
+      sort: [{ "@timestamp": { order: "asc", unmapped_type: "date" } }, { _shard_doc: "asc" }] } },
+    { kind: "closePit", id: rotated }
+  ];
+  let polled = 0;
+  const results: unknown[] = [], executed: unknown[] = [];
+  const api = async <T,>(path: string, options: { body: unknown }) => {
+    if (path === "/relay/poll") return { job: { id: crypto.randomUUID(), operation: operations[polled++] } } as T;
+    if (path === "/relay/result") { results.push(options.body); if (results.length === 2) controller.abort(); }
+    return {} as T;
+  };
+  const bridge = async (action: BridgeAction, params: unknown) => {
+    if (action === "agent.relay.execute") {
+      executed.push((params as { operation: unknown }).operation);
+      return success(executed.length === 1 ? { pit_id: rotated, hits: { hits: [] } } : { succeeded: true });
+    }
+    return success({ relayId: crypto.randomUUID(), source });
+  };
+  await runBrowserRelay({ api, bridge, policy, signal: controller.signal, onProgress: vi.fn(), pollMs: 0 });
+  expect(executed).toEqual(operations);
+  expect(results[0]).toMatchObject({ success: true, data: { pit_id: rotated } });
+  expect(results[1]).toMatchObject({ success: true, data: { succeeded: true } });
 });
 
 it.each([

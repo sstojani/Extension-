@@ -1,7 +1,7 @@
 import { z } from "zod";
 import {
   buildQuery, kibanaApiPath, relayPolicySchema, relayIndexAllowed, relaySourceFields,
-  validateRelayOperation, relayFieldCapsPath, RELAY_MAX_BYTES, type RelaySource
+  validateRelayOperation, relayFieldCapsPath, relayPitIdSchema, RELAY_MAX_PIT_ID_BYTES, RELAY_MAX_BYTES, type RelaySource
 } from "@soc-watch/protocol";
 import { BridgeOperationError, kibanaFetchJson, readRuntimeConfig } from "./kibana";
 
@@ -41,8 +41,11 @@ function snapshotId(raw: unknown): string {
   if (typeof response?.id !== "string" || !response.id) {
     throw new BridgeOperationError("KIBANA_UNREACHABLE", "The Elasticsearch snapshot response did not contain a valid ID. This is an unexpected response, not proof of missing read permissions.");
   }
-  if (response.id.length > 16384) {
-    throw new BridgeOperationError("RESULT_TOO_LARGE", "The Elasticsearch snapshot ID exceeds the bridge limit. Narrow the log index pattern in Agent Settings.");
+  if (!relayPitIdSchema.safeParse(response.id).success) {
+    const idBytes = new TextEncoder().encode(response.id).length;
+    throw new BridgeOperationError("RESULT_TOO_LARGE",
+      `Elasticsearch returned a ${idBytes}-byte snapshot ID; the bridge supports up to ${RELAY_MAX_PIT_ID_BYTES} bytes. This is a size limit, not an authentication failure. Choose a narrower log index pattern in Agent Settings.`,
+      { idBytes, maxIdBytes: RELAY_MAX_PIT_ID_BYTES });
   }
   return response.id;
 }
@@ -68,7 +71,11 @@ export class ServerBrowserRelay {
   }
   private async read(source: RelaySource, path: string, method: string, body?: unknown, timeoutMs = 22000) {
     const proxy = kibanaApiPath(`console/proxy${buildQuery({ path, method })}`, source.spaceId);
-    return this.deps.request(source, proxy, { method: "POST", ...(body ? { body: JSON.stringify(body) } : {}) }, { timeoutMs, maxBytes: RELAY_MAX_BYTES - 4096 });
+    const result = await this.deps.request(source, proxy, { method: "POST", ...(body ? { body: JSON.stringify(body) } : {}) }, { timeoutMs, maxBytes: RELAY_MAX_BYTES - 4096 });
+    if (new TextEncoder().encode(JSON.stringify(result)).length > RELAY_MAX_BYTES - 4096) {
+      throw new BridgeOperationError("RESULT_TOO_LARGE", "Relay response exceeds the 8 MiB limit. Reduce the page size or narrow the log index pattern.");
+    }
+    return result;
   }
   private require(id: string, owner: string) {
     const lease = this.lease;
@@ -126,15 +133,17 @@ export class ServerBrowserRelay {
       } else if (operation.kind === "search") {
         if (!lease.pits.has(operation.body.pit.id)) throw new Error("Search snapshot is not owned by this relay.");
         result = await this.read(lease.source, "/_search", "POST", { ...operation.body, _source: relaySourceFields(lease.source.policy) });
-        const raw = result as { pit_id?: string; hits?: { hits?: { _index: string }[] } };
+        const raw = result as { pit_id?: unknown; hits?: { hits?: { _index: string }[] } };
         if (raw?.hits?.hits?.some(hit => !relayIndexAllowed(hit._index, lease.source.policy.indexPattern))) throw new Error("Kibana returned an index outside the authorized log scope.");
-        if (raw.pit_id && raw.pit_id !== operation.body.pit.id) { lease.pits.delete(operation.body.pit.id); lease.pits.add(raw.pit_id); }
+        if (raw && Object.hasOwn(raw, "pit_id")) {
+          const id = snapshotId({ id: raw.pit_id });
+          if (id !== operation.body.pit.id) { lease.pits.delete(operation.body.pit.id); lease.pits.add(id); }
+        }
       } else if (operation.kind === "fieldCaps") {
         result = await this.read(lease.source, relayFieldCapsPath(operation.indexPattern, operation.fields), "POST");
       } else {
         result = await this.read(lease.source, `/${encodeURIComponent(operation.index)}/_doc/${encodeURIComponent(operation.id)}${buildQuery({ _source_includes: relaySourceFields(lease.source.policy).join(",") })}`, "GET");
       }
-      if (new TextEncoder().encode(JSON.stringify(result)).length > RELAY_MAX_BYTES - 4096) throw new Error("Relay evidence exceeds the size limit. Reduce the page size.");
       return result;
     })();
     this.completed.set(parsed.jobId, { operation: encoded, response });
