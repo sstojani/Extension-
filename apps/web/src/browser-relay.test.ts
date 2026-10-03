@@ -24,7 +24,10 @@ it("pumps one authenticated job at a time and disconnects both transports on can
   expect(progress).toHaveBeenCalledWith(expect.objectContaining({ state: "connected" }));
 });
 
-it("reports extension failure to the server and reconnects without claiming failed reads succeeded", async () => {
+it.each([
+  { code: "KIBANA_AUTH_REQUIRED", message: "Sign in to Kibana" },
+  { code: "KIBANA_UNREACHABLE", message: "Browser relay authorization expired" }
+] as const)("reports extension $code failure to the server and reconnects without claiming failed reads succeeded", async error => {
   const controller = new AbortController(); let connected = 0;
   const posts: { path: string; body: unknown }[] = [], progress = vi.fn();
   const api = async <T,>(path: string, options: { body: unknown }) => {
@@ -34,11 +37,11 @@ it("reports extension failure to the server and reconnects without claiming fail
     return {} as T;
   };
   const bridge = async (action: BridgeAction): Promise<BridgeResponse<unknown>> => action === "agent.relay.execute"
-    ? { version: 1, requestId: crypto.randomUUID(), success: false, error: { code: "KIBANA_AUTH_REQUIRED", message: "Sign in to Kibana" } }
+    ? { version: 1, requestId: crypto.randomUUID(), success: false, error }
     : success({ relayId: crypto.randomUUID(), source });
   await runBrowserRelay({ api, bridge, policy, signal: controller.signal, onProgress: progress, retryMs: 0 });
-  expect(posts.find(p => p.path === "/relay/result")?.body).toMatchObject({ success: false, error: "Sign in to Kibana" });
-  expect(progress).toHaveBeenCalledWith({ state: "disconnected", message: "Sign in to Kibana" });
+  expect(posts.find(p => p.path === "/relay/result")?.body).toMatchObject({ success: false, error: error.message });
+  expect(progress).toHaveBeenCalledWith({ state: "disconnected", message: error.message, retrying: true });
   expect(connected).toBe(2);
 });
 
@@ -49,5 +52,15 @@ it("does not register a provider when the extension is absent or the source is i
   const progress = vi.fn();
   await runBrowserRelay({ api, bridge, policy, signal: controller.signal, onProgress: progress });
   expect(routes).toEqual(["/relay/disconnect"]);
-  expect(progress).toHaveBeenCalledWith({ state: "disconnected", message: "Install Bridge" });
+  expect(progress).toHaveBeenCalledWith({ state: "disconnected", message: "Install Bridge", retrying: true });
+});
+
+it.each(["INVALID_REQUEST", "KIBANA_FORBIDDEN", "INVALID_ORIGIN"] as const)("stops retrying %s failures and cleans up instead of showing a connected button", async code => {
+  const controller = new AbortController(), progress = vi.fn(), routes: string[] = [];
+  const api = async <T,>(path: string) => { routes.push(path); return {} as T; };
+  const bridge = vi.fn(async (): Promise<BridgeResponse<unknown>> => ({ version: 1, requestId: crypto.randomUUID(), success: false, error: { code, message: "Review log settings" } }));
+  await runBrowserRelay({ api, bridge, policy, signal: controller.signal, onProgress: progress, retryMs: 0 });
+  expect(bridge).toHaveBeenCalledTimes(1);
+  expect(routes).toEqual(["/relay/disconnect"]);
+  expect(progress).toHaveBeenLastCalledWith({ state: "disconnected", message: "Review log settings", retrying: false });
 });

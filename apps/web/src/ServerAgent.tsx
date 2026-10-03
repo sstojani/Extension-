@@ -7,6 +7,7 @@ import {
 import "./server-agent.css";
 import { sendBridgeMessage } from "./bridge";
 import { runBrowserRelay, type RelayProgress } from "./browser-relay";
+import { relayPolicySchema, type DataViewSummary } from "@soc-watch/protocol";
 
 type IndicatorType = "ip" | "domain" | "hash" | "identity";
 type FindingStatus = "open" | "acknowledged" | "resolved" | "false_positive";
@@ -503,7 +504,7 @@ export function ServerAgent() {
         <Feedback error={error} success={success} />
         {pollError && <p className="sa-feedback sa-error" role="alert"><AlertTriangle size={16} aria-hidden="true" />State refresh failed: {pollError}{updatedAt && ` Last update: ${date(updatedAt)}.`}</p>}
         {state && health ? <>
-          {state.status.dataSource?.mode === "browser_relay" && <BrowserRelayControl api={api} config={state.config} dataSource={state.status.dataSource} canAdmin={canAdmin} onChange={() => setRefresh(value => value + 1)} />}
+          {state.status.dataSource?.mode === "browser_relay" && <BrowserRelayControl api={api} config={state.config} dataSource={state.status.dataSource} canAdmin={canAdmin} onChange={() => setRefresh(value => value + 1)} onSettings={() => setTab("Agent Settings")} />}
           <section className="sa-status-strip" aria-label="Agent status">
             <div><span>Agent</span><Badge tone={health.tone}>{health.label}</Badge></div>
             <div><span>Heartbeat</span><strong>{date(record(state.status.heartbeat) ? state.status.heartbeat.at ?? state.status.heartbeat.timestamp ?? state.status.heartbeat.lastSeen : state.status.heartbeat)}</strong></div>
@@ -535,8 +536,8 @@ export function ServerAgent() {
 
 export default ServerAgent;
 
-function BrowserRelayControl({ api, config, dataSource, canAdmin, onChange }: {
-  api: Api; config: AgentConfig; dataSource: NonNullable<AgentState["status"]["dataSource"]>; canAdmin: boolean; onChange: () => void;
+function BrowserRelayControl({ api, config, dataSource, canAdmin, onChange, onSettings }: {
+  api: Api; config: AgentConfig; dataSource: NonNullable<AgentState["status"]["dataSource"]>; canAdmin: boolean; onChange: () => void; onSettings: () => void;
 }) {
   const [enabled, setEnabled] = useState(false);
   const [progress, setProgress] = useState<RelayProgress>({ state: "disconnected", message: "" });
@@ -553,16 +554,17 @@ function BrowserRelayControl({ api, config, dataSource, canAdmin, onChange }: {
     const controller = new AbortController();
     void runBrowserRelay({ api, bridge: sendBridgeMessage, signal: controller.signal,
       policy: JSON.parse(authorizedScope),
-      onProgress: next => { setProgress(next); refresh.current(); }
+      onProgress: next => { if (controller.signal.aborted) return; setProgress(next); if (next.retrying === false) setEnabled(false); refresh.current(); }
     });
     return () => controller.abort();
   }, [enabled, canAdmin, api, authorizedScope]);
   const connected = enabled ? progress.state === "connected" && dataSource.ready : dataSource.ready;
   return <section className="sa-relay" aria-label="Browser data source">
     <div className="sa-section-heading"><div className="sa-actions"><Activity size={18} aria-hidden="true" /><h2>Browser relay</h2><Badge tone={connected ? "good" : "error"}>{connected ? enabled ? "This browser connected" : "Another browser connected" : progress.state === "connecting" ? "Connecting" : "Disconnected"}</Badge></div>
-      {canAdmin && <button className="sa-button" type="button" onClick={() => { if (!enabled) setAuthorizedScope(scope); setEnabled(value => !value); refresh.current(); }}><Activity size={16} aria-hidden="true" />{enabled ? "Disconnect browser" : "Connect this browser"}</button>}</div>
+      {canAdmin && <button className="sa-button" type="button" onClick={() => { if (!enabled) setAuthorizedScope(scope); else setProgress({ state: "disconnected", message: "" }); setEnabled(value => !value); refresh.current(); }}><Activity size={16} aria-hidden="true" />{enabled ? progress.state === "connected" ? "Disconnect browser" : "Stop reconnecting" : "Connect this browser"}</button>}</div>
     <p className="sa-muted">Keep this Server Agent page and a signed-in Kibana tab open on your work computer. Collection pauses when the browser disconnects. Returned log evidence is stored on this server; Kibana credentials stay in your browser.</p>
-    {progress.message && (enabled || authorizedScope !== scope) && <p className={progress.state === "disconnected" ? "sa-error" : "sa-muted"} role="status">{progress.message}{enabled && progress.state === "disconnected" && " Reconnecting automatically."}</p>}
+    {progress.message && <p className={progress.state === "disconnected" ? "sa-error" : "sa-muted"} role="status">{progress.message}{enabled && progress.state === "disconnected" && progress.retrying !== false && " Reconnecting automatically."}</p>}
+    {progress.retrying === false && <button className="sa-button" type="button" onClick={onSettings}><Settings size={16} aria-hidden="true" />Review Agent Settings</button>}
     {!enabled && dataSource.source && <p className="sa-muted">{dataSource.source.kibanaBaseUrl} / {dataSource.source.spaceId}</p>}
     {!canAdmin && <p className="sa-warning">An administrator must authorize the work browser relay.</p>}
   </section>;
@@ -723,6 +725,51 @@ export function configPatch(base: AgentConfig, draft: AgentConfig, advanced: str
   return Object.fromEntries(Object.entries(config).filter(([key, item]) => JSON.stringify(item) !== JSON.stringify(base[key as keyof AgentConfig]))) as Partial<AgentConfig>;
 }
 
+export function dataViewScope(raw: unknown): Pick<AgentConfig, "indexPattern" | "timestampField"> {
+  const view = record(raw) && record(raw.data_view) ? raw.data_view : null;
+  if (!view || typeof view.title !== "string" || typeof view.timeFieldName !== "string" || !view.timeFieldName) {
+    throw new Error("This Kibana data view has no configured time field. Choose a time-based log data view or set the fields manually.");
+  }
+  const policy = relayPolicySchema.safeParse({ indexPattern: view.title, timestampField: view.timeFieldName, infrastructureField: "observer.name" });
+  if (!policy.success) throw new Error("This data view is outside the relay's supported log scope. Enter a specific non-system index pattern and time field manually.");
+  return { indexPattern: policy.data.indexPattern, timestampField: policy.data.timestampField };
+}
+
+function KibanaDataViewPicker({ onSelect }: { onSelect: (scope: Pick<AgentConfig, "indexPattern" | "timestampField">) => void }) {
+  const [views, setViews] = useState<DataViewSummary[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [selected, setSelected] = useState("");
+  const [error, setError] = useState("");
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  const load = async () => {
+    setLoading(true); setError("");
+    try {
+      const response = await sendBridgeMessage<unknown, DataViewSummary[]>("dataViews.list", {});
+      if (!response.success) throw new Error(response.error.message);
+      if (!Array.isArray(response.data)) throw new Error("Kibana returned an invalid data-view list.");
+      const available = response.data.filter(view => record(view) && typeof view.id === "string" && typeof view.title === "string");
+      if (alive.current) { setViews(available); if (!available.length) setError("No accessible Kibana data views were returned. Enter the log index and time field manually."); }
+    } catch (caught) { if (alive.current) setError(errorMessage(caught)); }
+    finally { if (alive.current) setLoading(false); }
+  };
+  const choose = async (id: string) => {
+    setSelected(id); setError(""); if (!id) return;
+    setLoading(true);
+    try {
+      const response = await sendBridgeMessage("dataViews.get", { viewId: id });
+      if (!response.success) throw new Error(response.error.message);
+      const scope = dataViewScope(response.data);
+      if (alive.current) onSelect(scope);
+    } catch (caught) { if (alive.current) setError(errorMessage(caught)); }
+    finally { if (alive.current) setLoading(false); }
+  };
+  return <div className="sa-data-view-picker">
+    <div className="sa-actions"><Field label="Kibana data view"><select aria-label="Kibana data view" value={selected} disabled={loading || !views.length} onChange={event => void choose(event.target.value)}><option value="">Select a data view</option>{views.map(view => <option key={view.id} value={view.id}>{view.name || view.title}</option>)}</select></Field><button type="button" className="sa-button" disabled={loading} onClick={() => void load()}>{loading ? <LoaderCircle className="sa-spin" size={16} aria-hidden="true" /> : <RefreshCw size={16} aria-hidden="true" />}Load Kibana data views</button></div>
+    <Feedback error={error} />
+  </div>;
+}
+
 function AgentSettings({ config, status, api, action, busy, canAdmin }: {
   config: AgentConfig; status: AgentState["status"]; api: Api; action: Action; busy: string; canAdmin: boolean;
 }) {
@@ -769,6 +816,7 @@ function AgentSettings({ config, status, api, action, busy, canAdmin }: {
     <form onSubmit={submit}><fieldset className="sa-form-body" disabled={!canAdmin || !!busy}>
       <div className="sa-section-heading"><h2>Agent settings</h2><div className="sa-actions">{dirty && <span className="sa-warning">Unsaved changes</span>}<Toggle label="Scheduled scanning" checked={draft.enabled} onChange={enabled => patch({ enabled })} /></div></div>
       <div className="sa-toggle-group">{typeof draft.autoInvestigate === "boolean" && <Toggle label="Automatic investigation" checked={draft.autoInvestigate} onChange={autoInvestigate => patch({ autoInvestigate })} />}{typeof draft.huntEnabled === "boolean" && <Toggle label="Feed hunting" checked={draft.huntEnabled} onChange={huntEnabled => patch({ huntEnabled })} />}</div>
+      {status.dataSource?.mode === "browser_relay" && <KibanaDataViewPicker onSelect={scope => patch(scope)} />}
       <div className="sa-form-grid sa-settings-grid">
         <Field label="Index pattern"><input required value={draft.indexPattern} onChange={event => patch({ indexPattern: event.target.value })} maxLength={512} /></Field>
         <Field label="Timestamp field"><input required value={draft.timestampField} onChange={event => patch({ timestampField: event.target.value })} maxLength={128} /></Field>

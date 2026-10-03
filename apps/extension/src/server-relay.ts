@@ -1,7 +1,7 @@
 import { z } from "zod";
 import {
   buildQuery, kibanaApiPath, relayPolicySchema, relayIndexAllowed, relaySourceFields,
-  validateRelayOperation, RELAY_MAX_BYTES, type RelaySource
+  validateRelayOperation, relayFieldCapsPath, RELAY_MAX_BYTES, type RelaySource
 } from "@soc-watch/protocol";
 import { BridgeOperationError, kibanaFetchJson, readRuntimeConfig } from "./kibana";
 
@@ -13,6 +13,28 @@ const defaults = {
   tabs: async (): Promise<Array<{ url?: string | undefined }>> => chrome.tabs.query({}),
   clock: Date.now
 };
+
+function validateTimestamp(raw: unknown, source: RelaySource) {
+  const { indexPattern, timestampField } = source.policy;
+  const result = raw as { indices?: unknown[]; fields?: Record<string, Record<string, { searchable?: boolean }>>; _shards?: { failed?: number } } | null;
+  if (!result || typeof result.fields !== "object" || !result.fields || Array.isArray(result.fields)) {
+    throw new BridgeOperationError("KIBANA_UNREACHABLE", "Kibana returned an unexpected field-capabilities response; no log-read access was confirmed.");
+  }
+  if (result._shards?.failed) throw new BridgeOperationError("KIBANA_UNREACHABLE", "Kibana's log-field check was incomplete. No log-read access was confirmed.");
+  if (Array.isArray(result.indices) && !result.indices.length) {
+    throw new BridgeOperationError("INVALID_REQUEST", `No accessible indexes match "${indexPattern}". Choose the index pattern from your Kibana Discover data view in Agent Settings.`);
+  }
+  const types = Object.entries(result.fields[timestampField] || {}).filter(([type]) => type !== "unmapped");
+  if (!types.length) {
+    throw new BridgeOperationError("INVALID_REQUEST", `Timestamp field "${timestampField}" is not mapped in "${indexPattern}". Select your Kibana Discover data view's time field in Agent Settings.`);
+  }
+  if (types.some(([type]) => !["date", "date_nanos"].includes(type))) {
+    throw new BridgeOperationError("INVALID_REQUEST", `Timestamp field "${timestampField}" in "${indexPattern}" has incompatible types (${types.map(([type]) => type).join(", ")}). Use a date/date_nanos time field or narrow the index pattern in Agent Settings.`);
+  }
+  if (types.some(([, capability]) => capability?.searchable !== true)) {
+    throw new BridgeOperationError("INVALID_REQUEST", `Timestamp field "${timestampField}" is not searchable across "${indexPattern}". Check the field mappings or narrow the index pattern in Agent Settings. This is not proof of a login failure.`);
+  }
+}
 
 export class ServerBrowserRelay {
   private lease: { id: string; owner: string; source: RelaySource; expires: number; pits: Set<string> } | undefined;
@@ -33,7 +55,8 @@ export class ServerBrowserRelay {
   }
   private require(id: string, owner: string) {
     const lease = this.lease;
-    if (!lease || lease.id !== id || lease.owner !== owner || lease.expires < this.deps.clock()) throw new Error("Browser relay authorization expired. Reconnect it from the Server Agent page.");
+    if (!lease || lease.id !== id || lease.expires < this.deps.clock()) throw new BridgeOperationError("KIBANA_UNREACHABLE", "Browser relay authorization expired. Reconnect it from the Server Agent page.");
+    if (lease.owner !== owner) throw new BridgeOperationError("INVALID_ORIGIN", "Browser relay belongs to another console tab.");
     return lease;
   }
   async handle(action: string, params: unknown, owner: string) {
@@ -44,8 +67,8 @@ export class ServerBrowserRelay {
       const config = await this.deps.config();
       const source: RelaySource = { kibanaBaseUrl: config.kibanaBaseUrl.replace(/\/$/, ""), spaceId: config.spaceId || "default", policy };
       await this.checkBrowser(source);
-      const result = await this.read(source, `/${encodeURIComponent(policy.indexPattern)}/_field_caps`, "POST", { fields: [policy.timestampField], include_unmapped: true }, 7000) as { fields?: Record<string, unknown> };
-      if (!result?.fields || !Object.values(result.fields[policy.timestampField] || {}).some(type => (type as { searchable?: boolean }).searchable === true)) throw new Error("The signed-in Kibana user cannot search the configured log timestamp field. Check the index and timestamp settings.");
+      const result = await this.read(source, relayFieldCapsPath(policy.indexPattern, [policy.timestampField]), "POST", undefined, 7000);
+      validateTimestamp(result, source);
       // Metadata availability alone does not prove that this user can read log events.
       const proof = await this.read(source, `/${encodeURIComponent(policy.indexPattern)}/_pit?keep_alive=1m`, "POST", undefined, 7000) as { id?: unknown };
       if (typeof proof?.id !== "string" || !proof.id || proof.id.length > 16384) throw new Error("Kibana did not confirm log-read permissions.");
@@ -58,7 +81,8 @@ export class ServerBrowserRelay {
     if (action === "agent.relay.disconnect") { this.lease = undefined; this.completed.clear(); return { disconnected: true }; }
     await this.checkBrowser(lease.source);
     if (action === "agent.relay.heartbeat") {
-      await this.read(lease.source, `/${encodeURIComponent(lease.source.policy.indexPattern)}/_field_caps`, "POST", { fields: [lease.source.policy.timestampField], include_unmapped: true });
+      const result = await this.read(lease.source, relayFieldCapsPath(lease.source.policy.indexPattern, [lease.source.policy.timestampField]), "POST");
+      validateTimestamp(result, lease.source);
       lease.expires = this.deps.clock() + 90000;
       return { ready: true };
     }
@@ -86,7 +110,7 @@ export class ServerBrowserRelay {
         if (raw?.hits?.hits?.some(hit => !relayIndexAllowed(hit._index, lease.source.policy.indexPattern))) throw new Error("Kibana returned an index outside the authorized log scope.");
         if (raw.pit_id && raw.pit_id !== operation.body.pit.id) { lease.pits.delete(operation.body.pit.id); lease.pits.add(raw.pit_id); }
       } else if (operation.kind === "fieldCaps") {
-        result = await this.read(lease.source, `/${encodeURIComponent(operation.indexPattern)}/_field_caps`, "POST", { fields: operation.fields, include_unmapped: true });
+        result = await this.read(lease.source, relayFieldCapsPath(operation.indexPattern, operation.fields), "POST");
       } else {
         result = await this.read(lease.source, `/${encodeURIComponent(operation.index)}/_doc/${encodeURIComponent(operation.id)}${buildQuery({ _source_includes: relaySourceFields(lease.source.policy).join(",") })}`, "GET");
       }

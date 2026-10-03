@@ -1,5 +1,6 @@
 import { INDICATOR_FIELDS } from "./intelligence.mjs";
 import { BrowserRelay } from "./relay.mjs";
+import { relayFieldCapsPath } from "@soc-watch/protocol";
 
 export class ElasticClient {
   constructor(runtime, fetcher = fetch) { this.runtime = runtime; this.fetch = fetcher; this.relay = runtime.dataSource === "browser_relay" ? new BrowserRelay() : null; }
@@ -11,10 +12,11 @@ export class ElasticClient {
       if (path === "/_search" && method === "POST") operation = { kind: "search", body };
       else if (path === "/_pit" && method === "DELETE") operation = { kind: "closePit", id: body.id };
       else {
-        const parts = path.split("/");
+        const [pathname, query] = path.split("?");
+        const parts = pathname.split("/");
         const index = decodeURIComponent(parts[1] || "");
-        if (parts.length === 3 && parts[2] === "_pit?keep_alive=10m" && method === "POST") operation = { kind: "openPit", indexPattern: index };
-        else if (parts.length === 3 && parts[2] === "_field_caps" && method === "POST") operation = { kind: "fieldCaps", indexPattern: index, fields: body.fields };
+        if (parts.length === 3 && parts[2] === "_pit" && query === "keep_alive=10m" && method === "POST") operation = { kind: "openPit", indexPattern: index };
+        else if (parts.length === 3 && parts[2] === "_field_caps" && method === "POST") operation = { kind: "fieldCaps", indexPattern: index, fields: new URLSearchParams(query).get("fields")?.split(",") || body?.fields };
         else if (parts.length === 4 && parts[2] === "_doc" && method === "GET") operation = { kind: "evidence", index, id: decodeURIComponent(parts[3]) };
         else throw new Error("Unsupported browser relay operation.");
       }
@@ -32,7 +34,7 @@ export class ElasticClient {
   }
   async probe(config) {
     const fields = [config.timestampField, "source.ip", "destination.ip", "event.category", "event.outcome", "user.name", "dns.question.name", "file.hash.sha256", "source.bytes", "process.entity_id"];
-    const caps = await this.request(`/${encodeURIComponent(config.indexPattern)}/_field_caps`, { fields, include_unmapped: true });
+    const caps = await this.request(relayFieldCapsPath(config.indexPattern, fields), null);
     return Object.fromEntries(fields.map(field => [field, Object.values(caps.fields?.[field] || {}).some(type => type.searchable === true)]));
   }
   async page(config, from, to, cursor = null, extraQuery = null) {

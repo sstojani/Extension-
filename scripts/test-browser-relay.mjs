@@ -16,7 +16,7 @@ const server = spawn(process.execPath, ["scripts/serve-web.mjs"], { cwd: root, w
   SOC_WATCH_DATA_SOURCE: "browser_relay", SOC_WATCH_DATA_DIR: data, SOC_WATCH_PUBLIC_ORIGIN: origin, SOC_WATCH_AGENT_TOKEN: token,
   SOC_WATCH_GTI_API_KEY: "", SOC_WATCH_THREATFOX_KEY: "", SOC_WATCH_MALWAREBAZAAR_KEY: ""
 } });
-let output = "", browser;
+let output = "", browser, page;
 server.stdout.on("data", chunk => { output += chunk; }); server.stderr.on("data", chunk => { output += chunk; });
 try {
   for (let i = 0; i < 100; i++) {
@@ -25,7 +25,7 @@ try {
     await new Promise(r => setTimeout(r, 100));
   }
   browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+  page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
   const waitState = async (predicate, timeout = 30000) => {
     const deadline = Date.now() + timeout; let state;
     do {
@@ -38,16 +38,25 @@ try {
   const errors = []; page.on("pageerror", error => errors.push(error.message));
   await page.addInitScript(() => {
     window.fixtureAuthenticated = true;
+    window.fixtureSettingsError = true;
+    window.fixtureConnections = 0;
     const rows = Array.from({ length: 120 }, (_, i) => ({ _id: `${i}`, _index: ".ds-logs-network-default-2026.10.02-000001",
       sort: [new Date(Date.now() - 60000).toISOString(), i], _source: { "@timestamp": new Date(Date.now() - 60000).toISOString(),
         "source.ip": "185.220.101.4", "destination.ip": `10.0.0.${i % 10 + 1}`, "destination.port": 22,
-        "event.action": "denied", "event.outcome": "failure", "observer.name": `edge-${i % 3}`, "host.name": "target" } }));
+        "event.created": new Date(Date.now() - 60000).toISOString(), "event.action": "denied", "event.outcome": "failure", "observer.name": `edge-${i % 3}`, "host.name": "target" } }));
     window.addEventListener("message", event => {
       if (event.source !== window || event.data?.source !== "soc-watch-web") return;
       const request = event.data.message;
-      if (!request?.action?.startsWith("agent.relay.")) return;
+      if (!request?.action?.startsWith("agent.relay.") && !request?.action?.startsWith("dataViews.")) return;
       let data;
-      if (request.action === "agent.relay.disconnect") data = { disconnected: true };
+      if (request.action === "dataViews.list") data = [{ id: "logs-view", title: "logs-network-*", name: "Network logs" }];
+      else if (request.action === "dataViews.get") data = { data_view: { title: "logs-network-*", timeFieldName: "event.created" } };
+      else if (request.action === "agent.relay.connect" && window.fixtureSettingsError) {
+        window.fixtureConnections++;
+        window.postMessage({ source: "soc-watch-content", message: { type: "soc-watch.response", response: { version: 1, requestId: request.requestId,
+          success: false, error: { code: "INVALID_REQUEST", message: 'Timestamp field "@timestamp" is not mapped in "logs-*". Select your Kibana Discover data view\'s time field in Agent Settings.' } } } }, window.location.origin); return;
+      }
+      else if (request.action === "agent.relay.disconnect") data = { disconnected: true };
       else if (!window.fixtureAuthenticated) {
         window.postMessage({ source: "soc-watch-content", message: { type: "soc-watch.response", response: { version: 1, requestId: request.requestId,
           success: false, error: { code: "KIBANA_AUTH_REQUIRED", message: "Kibana authentication is required." } } } }, window.location.origin); return;
@@ -73,6 +82,32 @@ try {
   await page.getByText("Collection paused", { exact: true }).first().waitFor();
   assert.equal(await page.getByRole("button", { name: "Scan", exact: true }).isDisabled(), true);
   await page.screenshot({ path: resolve(data, "desktop-disconnected.png"), fullPage: true });
+  await page.getByRole("button", { name: "Connect this browser", exact: true }).click();
+  await page.getByRole("button", { name: "Review Agent Settings", exact: true }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "Disconnect browser", exact: true }).count(), 0);
+  assert.equal(await page.getByText("Reconnecting automatically.", { exact: false }).count(), 0);
+  assert.equal(await page.getByRole("button", { name: "Scan", exact: true }).isDisabled(), true);
+  await page.screenshot({ path: resolve(data, "desktop-settings-error.png"), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: resolve(data, "mobile-settings-error.png"), fullPage: true });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, "Mobile settings-error overflow");
+  await page.getByRole("button", { name: "Review Agent Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Load Kibana data views", exact: true }).click();
+  await page.getByLabel("Kibana data view", { exact: true }).selectOption("logs-view");
+  await page.getByLabel("Timestamp field", { exact: true }).waitFor();
+  await page.waitForFunction(() => [...document.querySelectorAll("input")].some(input => input.value === "event.created"));
+  assert.equal(await page.getByLabel("Index pattern", { exact: true }).inputValue(), "logs-network-*");
+  const unsaved = await page.evaluate(async () => (await (await fetch("/api/agent/state")).json()).config);
+  assert.equal(unsaved.indexPattern, "logs-*");
+  assert.equal(unsaved.timestampField, "@timestamp");
+  assert.equal(await page.evaluate(() => window.fixtureConnections), 1, "Settings failures must not loop");
+  await page.screenshot({ path: resolve(data, "mobile-data-view.png"), fullPage: true });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, "Mobile data-view overflow");
+  await page.getByRole("button", { name: "Save settings", exact: true }).click();
+  await waitState(state => state.config.indexPattern === "logs-network-*" && state.config.timestampField === "event.created");
+  await page.evaluate(() => { window.fixtureSettingsError = false; });
+  await page.getByRole("button", { name: "Findings", exact: true }).click();
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await page.evaluate(async () => {
     const state = await (await fetch("/api/agent/state")).json();
     const save = await fetch("/api/agent/config", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...state.config, pageSize: 100, autoInvestigate: false }) });
@@ -108,14 +143,18 @@ try {
   // Scope changes need fresh consent, rather than silently broadening browser access.
   await waitState(state => !state.status.running && state.status.dataSource.ready);
   await page.evaluate(async () => {
-    const saved = await fetch("/api/agent/config", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ indexPattern: "logs-network-*" }) });
+    const saved = await fetch("/api/agent/config", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ indexPattern: "logs-network-default" }) });
     if (!saved.ok) throw new Error(await saved.text());
   });
   await page.getByRole("button", { name: "Refresh state", exact: true }).click();
   await page.getByRole("button", { name: "Connect this browser", exact: true }).waitFor();
   assert.equal((await page.evaluate(async () => (await (await fetch("/api/agent/state")).json()))).status.dataSource.ready, false);
   assert.deepEqual(errors, []);
-  console.log(`Browser relay regression passed: desktop/mobile, paginated scan, watch alert, auth loss and automatic recovery. Screenshots: ${data}`);
+  console.log(`Browser relay regression passed: desktop/mobile, settings failures, explicit data-view selection, paginated scan, watch alert, auth loss and automatic recovery. Screenshots: ${data}`);
+} catch (error) {
+  await page?.screenshot({ path: resolve(data, "failure.png"), fullPage: true }).catch(() => {});
+  console.error(`Browser test failure screenshot: ${data}`);
+  throw error;
 } finally {
   await browser?.close();
   server.kill();

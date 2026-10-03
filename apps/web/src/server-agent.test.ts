@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   agentRequest, AgentApiError, channelDraft, configPatch, createAlertCursor,
-  notificationPayload, orderedFindings, scanHealth, validateConfig, validateRule,
+  notificationPayload, orderedFindings, scanHealth, validateConfig, validateRule, dataViewScope,
   type AgentConfig, type AgentState, type Finding, type WatchRule
 } from "./ServerAgent";
 
@@ -105,6 +105,13 @@ describe("server agent transport", () => {
 });
 
 describe("configuration and rules", () => {
+  it("copies the explicitly selected data view's index and time field without guessing or taking other settings", () => {
+    expect(dataViewScope({ data_view: { title: "firewall-*,logs-*", timeFieldName: "event.created", name: "Network" } })).toEqual({ indexPattern: "firewall-*,logs-*", timestampField: "event.created" });
+    for (const data_view of [{ title: "logs-*" }, { title: "*", timeFieldName: "@timestamp" }, { title: ".security", timeFieldName: "@timestamp" }, { title: "logs-*", timeFieldName: "invalid field" }]) {
+      expect(() => dataViewScope({ data_view })).toThrow();
+    }
+    expect(() => dataViewScope(null)).toThrow("no configured time field");
+  });
   it("validates editable detector thresholds independently of the scheduler", () => {
     expect(validateConfig({ ...config, scanMinAttempts: 30, beaconMaxCv: 0.15, exfilRatio: 5 })).toBeNull();
     expect(validateConfig({ ...config, scanMinAttempts: 4 })).toContain("scanMinAttempts");

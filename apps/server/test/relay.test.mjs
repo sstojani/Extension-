@@ -26,6 +26,26 @@ test("browser mode ignores unreachable direct credentials and never calls server
   await assert.rejects(elastic.request("/_search", search.body), /disconnected/);
 });
 
+test("field-capability probes use URL parameters in direct mode and preserve field lists in relay mode", async () => {
+  const calls = [];
+  const direct = new ElasticClient({ dataSource: "direct", elasticUrl: "https://elastic.internal", elasticApiKey: "fixture" }, async (url, options) => {
+    calls.push({ url, options });
+    return Response.json({ fields: { "@timestamp": { date: { searchable: true } } } });
+  });
+  const caps = await direct.probe(defaults);
+  assert.equal(caps["@timestamp"], true);
+  assert.equal(calls[0].options.body, undefined);
+  assert.equal(new URL(calls[0].url).searchParams.get("include_unmapped"), "true");
+  assert.ok(new URL(calls[0].url).searchParams.get("fields").split(",").includes("@timestamp"));
+  const relay = new ElasticClient(runtimeConfig({}));
+  let operation;
+  relay.relay.execute = async value => { operation = value; return { fields: {} }; };
+  await relay.probe(defaults);
+  assert.equal(operation.kind, "fieldCaps");
+  assert.equal(operation.indexPattern, "logs-*");
+  assert.ok(operation.fields.includes("@timestamp"));
+});
+
 test("relay read grammar rejects writes, scripts, broad queries and system indexes", () => {
   assert.equal(validateRelayOperation(search, policy).kind, "search");
   for (const bad of [

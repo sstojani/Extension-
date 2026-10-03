@@ -74,6 +74,9 @@
 .server-agent .sa-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; color: var(--sa-text); font-size: 13px; }
 .server-agent .sa-field > span { color: var(--sa-muted); }
 .server-agent .sa-field select { width: 100%; }
+.server-agent .sa-data-view-picker { margin-top: 16px; }
+.server-agent .sa-data-view-picker .sa-actions { align-items: flex-end; }
+.server-agent .sa-data-view-picker .sa-field { flex: 1 1 280px; max-width: 640px; }
 .server-agent .sa-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 16px 0; max-width: 1040px; }
 .server-agent .sa-form-body { min-width: 0; border: 0; margin: 0; padding: 0; }
 .server-agent .sa-modal :is(button, input, select, textarea, summary, [tabindex]) { scroll-margin-top: 84px; }

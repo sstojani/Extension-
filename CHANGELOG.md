@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.15.1 - 2026-10-03
+
+- Use documented field-capabilities URL parameters for browser-relay and direct probes; distinguish missing indexes, unmapped time fields, incompatible mappings, incomplete responses and permissions.
+- Stop retrying configuration/permission failures until the analyst corrects them; preserve transient/authentication reconnects and show truthful connect/reconnect controls.
+- Add explicit Kibana data-view selection in Server Agent settings, using the view's actual index and time field without auto-saving or broadening collection scope.
+- Add connection/probe regressions and desktop/mobile recovery checks. Live organization field mappings still require deployment validation.
+
 ## 0.15.0 - 2026-10-02
 
 - Added explicitly authorized browser-relay collection for the Server Agent using the work browser's authenticated Kibana session, without copying credentials or requiring an Elasticsearch API key.

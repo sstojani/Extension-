@@ -54,6 +54,10 @@ export const relaySourceSchema = z.object({
 }).strict();
 export type RelaySource = z.infer<typeof relaySourceSchema>;
 export const RELAY_MAX_BYTES = 8 * 1024 * 1024;
+export function relayFieldCapsPath(indexPattern: string, fields: string[]): string {
+  const query = new URLSearchParams({ fields: fields.join(","), include_unmapped: "true" });
+  return `/${encodeURIComponent(indexPattern)}/_field_caps?${query}`;
+}
 export function relayIndexAllowed(index: string, pattern: string): boolean {
   if (typeof index !== "string" || index.startsWith(".") && !index.startsWith(".ds-")) return false;
   const name = index.startsWith(".ds-") ? index.slice(4).replace(/-\d{4}\.\d{2}\.\d{2}-\d+$/, "") : index;

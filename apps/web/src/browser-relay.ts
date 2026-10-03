@@ -1,8 +1,12 @@
-import { relaySourceSchema, relayOperationSchema, type BridgeAction, type BridgeResponse, type RelayPolicy } from "@soc-watch/protocol";
+import { relaySourceSchema, relayOperationSchema, type BridgeAction, type BridgeResponse, type BridgeErrorCode, type RelayPolicy } from "@soc-watch/protocol";
 
-export type RelayProgress = { state: "connecting" | "connected" | "disconnected"; message: string };
+export type RelayProgress = { state: "connecting" | "connected" | "disconnected"; message: string; retrying?: boolean };
 type Api = <T>(path: string, options: { method: string; body: unknown; signal?: AbortSignal }) => Promise<T>;
 type Bridge = (action: BridgeAction, params: unknown) => Promise<BridgeResponse<unknown>>;
+
+class RelayBridgeError extends Error {
+  constructor(message: string, readonly code: BridgeErrorCode) { super(message); }
+}
 
 function sleep(ms: number, signal: AbortSignal) {
   return new Promise<void>(resolve => {
@@ -19,13 +23,14 @@ export async function runBrowserRelay({ api, bridge, policy, signal, onProgress,
   const clientId = crypto.randomUUID();
   const call = async (action: BridgeAction, params: unknown) => {
     const response = await bridge(action, params);
-    if (!response.success) throw new Error(response.error.message);
+    if (!response.success) throw new RelayBridgeError(response.error.message, response.error.code);
     if (signal.aborted) throw new DOMException("Relay cancelled", "AbortError");
     return response.data;
   };
   const post = <T>(route: string, body: unknown) => api<T>(route, { method: "POST", body, signal });
   while (!signal.aborted) {
     let relayId: string | undefined;
+    let retrying = true;
     try {
       onProgress({ state: "connecting", message: "Verifying the extension and signed-in Kibana session..." });
       const connection = await call("agent.relay.connect", policy) as { relayId: string; source: unknown };
@@ -46,15 +51,17 @@ export async function runBrowserRelay({ api, bridge, policy, signal, onProgress,
         if (signal.aborted) break;
         await post("/relay/result", { clientId, id: job.id, success: result.success,
           ...(result.success ? { data: result.data } : { error: result.error.message }) });
-        if (!result.success) throw new Error(result.error.message);
+        if (!result.success) throw new RelayBridgeError(result.error.message, result.error.code);
       }
     } catch (error) {
-      if (!signal.aborted) onProgress({ state: "disconnected", message: error instanceof Error ? error.message : "Browser relay failed." });
+      retrying = !(error instanceof RelayBridgeError && ["INVALID_REQUEST", "INVALID_ORIGIN", "KIBANA_FORBIDDEN"].includes(error.code));
+      if (!signal.aborted) onProgress({ state: "disconnected", message: error instanceof Error ? error.message : "Browser relay failed.", retrying });
     } finally {
       // Cleanup must still run after the polling AbortController is cancelled.
       await api("/relay/disconnect", { method: "POST", body: { clientId } }).catch(() => {});
       if (relayId) await bridge("agent.relay.disconnect", { relayId }).catch(() => {});
     }
+    if (!retrying) return;
     if (!signal.aborted) await sleep(retryMs, signal);
   }
 }
