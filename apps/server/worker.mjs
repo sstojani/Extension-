@@ -5,6 +5,7 @@ import { enrichQueue, publicIndicator, reputationSource } from "./reputation.mjs
 import { excluded, recordAlert, deliverQueue } from "./alerts.mjs";
 import { investigateFinding } from "./investigator.mjs";
 import { collectFeeds, campaignBatch, feedMatchQuery } from "./feeds.mjs";
+import { findingSummary, findingOverview, FINDING_OVERVIEW_LIMIT, runSummary, investigationSummary, alertSummary } from "./console-state.mjs";
 
 export function dayStart(now, timezone) {
   const formatter = new Intl.DateTimeFormat("en-GB", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
@@ -393,17 +394,20 @@ export class AgentWorker {
     const config = this.config(), reps = Object.values(this.store.reputationMap());
     const notifications = this.store.get("notifications", { channels: [], minPriority: config.autoAlertMinPriority, cooldownMinutes: 60 });
     const ready = this.ready();
+    const findings = this.store.list("finding", FINDING_OVERVIEW_LIMIT, finding => excluded(finding, config, Date.parse(this.clock())) ? null : findingSummary(finding))
+      .filter(Boolean).sort((a,b) => b.priority - a.priority || String(b.lastSeen).localeCompare(String(a.lastSeen)));
+    const retained = this.store.db.prepare("SELECT COUNT(*) AS count FROM records WHERE kind='finding'").get().count;
     return { status: { ...this.status, enabled: config.enabled, configured: this.configured(), running: ready && (Boolean(this.scan) || this.running), paused: !ready,
       live: { ...(this.liveStatus.scopeKey === this.liveScope(config) ? this.liveStatus : { lastSuccess: null, lastError: null, nextScan: null, stages: {} }), running: Boolean(this.liveRunning) }, historical: this.scan ? { id: this.scan.id, mode: this.scan.mode, from: this.scan.from, to: this.scan.to, eventsRead: this.scan.eventsRead, totalMatched: this.scan.totalMatched, paused: this.scan.paused === true } : null,
       dataSource: this.elastic.relay ? this.elastic.relay.status() : { mode: "direct", ready } }, config,
-      rules: this.store.list("rule"), findings: this.store.list("finding", 2000).filter(finding => !excluded(finding, config, Date.parse(this.clock()))).sort((a,b) => b.priority - a.priority),
-      alerts: this.store.list("alert", 200), runs: this.store.list("run", 30), deliveries: this.store.deliveries(),
+      rules: this.store.list("rule"), ...findingOverview(findings, retained),
+      alerts: this.store.list("alert", 200, alertSummary), runs: this.store.list("run", 30, runSummary), deliveries: this.store.deliveries(),
       notifications: { ...notifications, channels: notifications.channels.map(({ url, token, chatId, ...c }) => ({ ...c, configured: Boolean(url || (token && chatId)) })) },
       integrations: this.runtime.integrations?.status(),
       reputation: { configured: reputationSource(this.runtime, this.elastic.relay) !== "missing", source: reputationSource(this.runtime, this.elastic.relay), pending: reps.filter(r => r.status === "pending").length,
         unavailable: reps.filter(r => ["unavailable", "unauthorized", "rate_limited"].includes(r.status)).length,
         scored: reps.filter(r => r.status === "scored").length, notFound: reps.filter(r => r.status === "not_found").length },
-      campaigns: this.store.list("campaign", 5).map(({ iocs, cursor, config, ...c }) => c), investigations: this.store.list("investigation", 100) };
+      campaigns: this.store.list("campaign", 5, ({ iocs, cursor, config, ...c }) => c), investigations: this.store.list("investigation", 100, investigationSummary) };
   }
   async investigationQueue() {
     for (const job of this.store.list("investigation", 1000).filter(j => j.status === "pending").slice(-2)) {

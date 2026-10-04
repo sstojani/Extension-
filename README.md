@@ -2,11 +2,13 @@
 
 SOC Watch is an internal cybersecurity console for Elastic/Kibana environments. It is split into a Chrome Manifest V3 bridge extension and a separate web application. The bridge reuses the analyst's already-authenticated Kibana browser session through `fetch(..., { credentials: "include" })` without reading, storing, or forwarding cookies or authentication material.
 
-Current product version: `0.16.1`. The Bridge Console verifies the extension. The Server Agent console (`/#server-agent`) can collect through an authenticated work browser relay without an Elasticsearch API key, or use optional direct read-only Elasticsearch credentials. Both display actual coverage/connection state.
+Current product version: `0.16.2`. The Bridge Console verifies the extension. The Server Agent console (`/#server-agent`) can collect through an authenticated work browser relay without an Elasticsearch API key, or use optional direct read-only Elasticsearch credentials. Both display actual coverage/connection state.
 
 Integration keys saved in Bridge Settings belong to that Chrome profile/extension installation. Reload the existing extension from its permanent folder when updating; removing it or changing its ID/profile can lose that storage. Server Agent can use the connected Bridge's GTI key without copying it, or administrators can save separate persistent server keys under **Integrations**. The server loads its optional root `.env` or `SOC_WATCH_ENV_FILE`; process/systemd values take precedence. Never put provider keys in `VITE_*` variables. See [server key storage and configuration](docs/SERVER-AGENT.md#integration-keys).
 
 Server Agent live monitoring now runs independently of historical collection: by default it checks a sliding five-minute window, with a 30-second interval after each check. Bounded Elasticsearch aggregation templates find blocked network fanout, retrieve accepted-connection context, and sample authentication/security evidence without downloading every matching log. Counts are labeled as lower bounds and sample coverage, not complete detection. Enable live monitoring explicitly in the Server Agent console, enable browser notifications in Delivery, and stop any unwanted historical scan with **Stop historical scan**. Today/Baseline remain explicit background collection. Update the extension and server together.
+
+Server Agent refreshes transfer compact finding/run/investigation summaries instead of every retained proof bundle. Open a finding to load its full evidence, notes and investigation on demand. The 8 MiB console response safeguard remains enabled; overview limits are shown explicitly and do not clear stored history.
 
 ## Workspace
 

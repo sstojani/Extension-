@@ -32,7 +32,12 @@ export class Store {
     return result;
   }
   one(kind, id) { const row = this.db.prepare("SELECT body FROM records WHERE kind=? AND id=?").get(kind, id); return row ? JSON.parse(row.body) : null; }
-  list(kind, limit = 1000) { return this.db.prepare("SELECT body FROM records WHERE kind=? ORDER BY updated DESC LIMIT ?").all(kind, limit).map(row => JSON.parse(row.body)); }
+  list(kind, limit = 1000, project = value => value) {
+    const rows = [];
+    // Project one record at a time so overview polling does not retain every full proof bundle in memory.
+    for (const row of this.db.prepare("SELECT body FROM records WHERE kind=? ORDER BY updated DESC LIMIT ?").iterate(kind, limit)) rows.push(project(JSON.parse(row.body)));
+    return rows;
+  }
   remove(kind, id) { this.db.prepare("DELETE FROM records WHERE kind=? AND id=?").run(kind, id); }
   audit(action, body) { this.db.prepare("INSERT INTO audit(timestamp,action,body) VALUES (?,?,?)").run(new Date().toISOString(), action, JSON.stringify(body)); }
   addEvents(events) {

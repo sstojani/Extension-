@@ -1,4 +1,4 @@
-# Persistent Server Agent (0.16.1)
+# Persistent Server Agent (0.16.2)
 
 ## What Changes
 
@@ -55,7 +55,7 @@ The unit creates `/var/lib/soc-watch` owned by `socwatch` and allows writes only
 
 ## Connect The Work Browser
 
-1. Open the hosted console on the work computer that can reach Kibana. Download Bridge v0.16.1 from the installation page, fully extract it to a permanent folder and load the folder containing `manifest.json` at `chrome://extensions`. Reload the console once. For updates, replace the contents of that same permanent folder and reload the existing extension; do not remove it first or switch profiles.
+1. Open the hosted console on the work computer that can reach Kibana. Download Bridge v0.16.2 from the installation page, fully extract it to a permanent folder and load the folder containing `manifest.json` at `chrome://extensions`. Reload the console once. For updates, replace the contents of that same permanent folder and reload the existing extension; do not remove it first or switch profiles.
 2. Set the correct Kibana URL/space in the Bridge settings and open a signed-in Kibana tab in the same browser profile.
 3. Sign in to Server Agent with an administrator token. In **Agent Settings**, click **Load Kibana data views** and explicitly choose the time-based log view used in Discover, or enter the exact index/time field manually. Selection changes only the draft: review the index, timestamp and infrastructure fields and click **Save settings**, then **Connect this browser**. This explicitly authorizes returning log evidence to the SOC Watch server. Obtain your organization's approval before moving security telemetry to a home-hosted service.
 4. Verify **This browser connected**, run a Live scan, then explicitly enable **Live monitoring enabled**. Existing disabled schedules remain disabled after upgrade. Both this console tab and the authenticated work browser must remain open. In Delivery, enable browser notifications and grant Chrome permission, or configure an enabled webhook/Discord/Telegram channel and test its delivery.
@@ -71,6 +71,14 @@ The connection check requires a mapped searchable `date`/`date_nanos` time field
 Kibana Console may return HTTP 200 while reporting Elasticsearch's actual status in `x-console-proxy-status-code`. Both background and tab fetches check this status and error bodies before accepting evidence. Failures show the operation, status and a bounded error type, not raw provider bodies or credentials. A 403 is an actual permission denial; a 400/404/405 when opening a snapshot requires checking the chosen data view and PIT compatibility. PIT requires [Elasticsearch 7.10 or newer and index read privilege](https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-open-point-in-time). Missing snapshot IDs and incomplete shards are not relabeled as permission denials. See [Elastic's Console proxy implementation](https://github.com/elastic/kibana/blob/main/src/platform/plugins/shared/console/server/routes/api/console/proxy/create_handler.ts).
 
 Closing the browser/tab, signing out, losing connectivity or expiring the eight-hour server login pauses collection. The provider lease expires within 60 seconds after its last poll. Temporary failures reconnect automatically while this console is open and opted in; login expiry requires signing in again. Reloading/navigating away disconnects the provider and requires clicking Connect again. Pending fixed windows resume without advancing past unread events; expired snapshots are replayed with evidence deduplication. Browser sleep/timer throttling may pause collection. Reputation follow-ups using a server-managed GTI key and already-queued notification delivery can continue without the browser, but **new ELK events and browser-key reputation cannot be collected while the relay is offline**. A home service alone is not an always-on route into the organization.
+
+## Console Refresh And Retained Details
+
+The console keeps its 8 MiB JSON-response safety limit. Version 0.16.2 fixes large state refreshes by returning finding summaries, investigation statuses and run summaries without bulk proof, notes, timelines or snapshot cursors. Existing database records are not deleted or rewritten by this change.
+
+Opening a finding uses an authenticated read of that individual finding and its investigation. Its details refresh while the inspector is open; a temporary detail error preserves the last loaded details, shows the failure and offers **Retry details**. Raw-event reads still use authorized proof references and the separate 256 KiB bound. Browser notifications retain the alert's reasons and observed context.
+
+The overview considers the latest 2,000 retained finding records and limits finding summaries to 2 MiB. If either bound limits the view, a visible notice shows the returned/stored counts and makes clear that search/status/time filters apply to the overview, not the entire database. Whitelist exclusions still apply. Retention, collection limits and detection criteria are unchanged; do not clear the database or narrow the ELK index to work around a state-response error. Pull, rebuild and restart the web service, then reload the console to activate the matched server/web fix.
 
 ## Integration Keys
 

@@ -50,6 +50,7 @@ export type Finding = {
   } | null; firstSeen: string; lastSeen: string; count: number; evidence: Evidence[];
   reasons: string[]; limitations: string[]; status: FindingStatus; assignedTo?: string; notes?: unknown; activity?: ActivityContext;
 };
+type FindingSummary = Omit<Finding, "evidence" | "reasons" | "limitations" | "notes" | "activity">;
 type Run = {
   id: string; startedAt: string; finishedAt: string | null; mode: string; status: string;
   eventsRead: number; totalMatched: number; invalidEvents: number; coverage: unknown;
@@ -81,7 +82,8 @@ export type AgentState = {
     live?: { running?: boolean; lastSuccess: string | null; lastAttempt?: string; lastError: string | null; nextScan: string | null; from?: string; to?: string; evidenceRead?: number; findings?: number; coverage?: string; stages: Record<string, { status: string; error?: string; matched?: number; evidenceRead?: number }> };
     historical?: { id: string; mode: string; from: string; to: string; eventsRead: number; totalMatched: number; paused?: boolean } | null;
   };
-  config: AgentConfig; rules: WatchRule[]; findings: Finding[]; runs: Run[]; alerts: Alert[];
+  config: AgentConfig; rules: WatchRule[]; findings: FindingSummary[]; runs: Run[]; alerts: Alert[];
+  findingWindow?: { limit: number; returned: number; retained: number; limited: boolean };
   deliveries: { id: string; channel: string; status: string; attempts: number; nextAttempt: string | null; error?: string }[];
   notifications: { channels: Channel[]; minPriority: number; cooldownMinutes: number };
   reputation: { pending: number; unavailable: number; scored: number; configured?: boolean; notFound?: number; source?: string }; campaigns: Campaign[];
@@ -147,7 +149,10 @@ export async function agentRequest<T = unknown>(path: string, options: RequestOp
     if (response.status === 401) throw new AgentApiError("Session expired or token rejected. Sign in again.", 401);
     if (response.status === 404) throw new AgentApiError("This server agent endpoint is unavailable on this deployment.", 404);
     const limit = options.maxBytes ?? 8 * 1024 * 1024;
-    if (Number(response.headers.get("content-length")) > limit) throw new AgentApiError("Response exceeds the console's size limit.", response.status);
+    if (Number(response.headers.get("content-length")) > limit) {
+      await response.body?.cancel();
+      throw new AgentApiError("Response exceeds the console's size limit.", response.status);
+    }
     const reader = response.body?.getReader();
     const chunks: Uint8Array[] = [];
     let length = 0;
@@ -539,7 +544,7 @@ export function ServerAgent() {
             <div><span>Heartbeat</span><strong>{date(record(state.status.heartbeat) ? state.status.heartbeat.at ?? state.status.heartbeat.timestamp ?? state.status.heartbeat.lastSeen : state.status.heartbeat)}</strong></div>
             <div><span>Last live success</span><strong>{date(state.status.live?.lastSuccess ?? state.status.lastSuccess)}</strong></div>
             <div><span>Next live check</span><strong>{state.config.enabled ? date(state.status.live?.nextScan ?? state.status.nextScan) : "Paused"}</strong></div>
-            <div><span>Retained open findings</span><strong className="sa-number">{count(openCount)}</strong></div>
+            <div><span>{state.findingWindow?.limited ? "Open findings in overview" : "Retained open findings"}</span><strong className="sa-number">{count(openCount)}</strong></div>
             <div><span>GTI / VirusTotal ({reputationSourceLabel(state)})</span><strong>{count(state.reputation.pending)} pending / {count(state.reputation.unavailable)} unavailable</strong></div>
           </section>
           {health.tone !== "good" && <p className={`sa-feedback sa-${health.tone}`}><Activity size={16} aria-hidden="true" />{health.detail}</p>}
@@ -566,7 +571,7 @@ export function ServerAgent() {
         </> : <div className="sa-empty" role="status"><LoaderCircle className="sa-spin" size={24} aria-hidden="true" /><h2>Loading agent state</h2>{pollError && <button className="sa-button" onClick={() => setRefresh(value => value + 1)}><RefreshCw size={16} aria-hidden="true" />Retry</button>}</div>}
       </>}
     </main>
-    {authenticated && selected && <FindingInspector key={selected.id} finding={selected} investigation={state?.investigations?.find(item => item.id === selected.id)} api={api} action={action} busy={busy} mutationError={error} onClose={() => setSelectedId(null)} />}
+    {authenticated && selected && <FindingDetails key={selected.id} summary={selected} api={api} action={action} busy={busy} mutationError={error} onClose={() => setSelectedId(null)} />}
     {authenticated && canAdmin && cancelOpen && <Modal title="Stop historical collection" onClose={() => setCancelOpen(false)}><p>Stop after the current read returns? Collected proof and findings remain stored. Its checkpoint will not be advanced.</p><Feedback error={error} /><div className="sa-actions"><button className="sa-button" onClick={() => setCancelOpen(false)}>Keep collecting</button><button className="sa-button sa-danger" disabled={!!busy} onClick={() => void action("cancel", "/scan/cancel", { confirm: true }).then(ok => { if (ok) { setCancelOpen(false); setSuccess("Historical cancellation queued. Live monitoring is unchanged."); } })}><Square size={16} aria-hidden="true" />Stop collection</button></div></Modal>}
     {authenticated && canAdmin && clearOpen && <Modal title="Clear active findings" onClose={() => setClearOpen(false)}><p>Resolve and archive {count(openCount)} active findings? Audit history is retained.</p><Feedback error={error} /><div className="sa-actions"><button type="button" className="sa-button" onClick={() => setClearOpen(false)}>Cancel</button><button type="button" className="sa-button sa-danger" disabled={!!busy} onClick={() => void action("clear", "/clear", { confirm: true }).then(ok => { if (ok) { setClearOpen(false); setSuccess("Active findings archived. Audit history retained."); } })}><Trash2 size={16} aria-hidden="true" />{busy === "clear" ? "Clearing..." : "Clear active findings"}</button></div></Modal>}
   </div>;
@@ -608,7 +613,7 @@ function BrowserRelayControl({ api, config, dataSource, canAdmin, onChange, onSe
   </section>;
 }
 
-export function orderedFindings(findings: Finding[]): Finding[] {
+export function orderedFindings<T extends FindingSummary>(findings: T[]): T[] {
   return [...findings].sort((a, b) => b.priority - a.priority || Date.parse(b.lastSeen) - Date.parse(a.lastSeen) || a.id.localeCompare(b.id));
 }
 
@@ -636,6 +641,7 @@ function Findings({ state, health, onInspect, onClear, disabled }: {
         <select aria-label="Finding status filter" value={filter} onChange={event => { setFilter(event.target.value); setPage(0); }}><option value="active">Active</option><option value="all">All statuses</option><option value="open">Open</option><option value="acknowledged">Acknowledged</option><option value="resolved">Resolved</option><option value="false_positive">False positive</option></select>
         <button className="sa-icon sa-danger-text" title="Clear active findings" aria-label="Clear active findings" onClick={onClear} disabled={disabled || !state.findings.some(finding => ["open", "acknowledged"].includes(finding.status))}><Trash2 size={17} /></button>
       </div></div>
+      {state.findingWindow?.limited && <p role="status" className="sa-warning">Overview limited to {count(state.findingWindow.returned)} findings from the latest {count(state.findingWindow.limit)} retained records ({count(state.findingWindow.retained)} stored). Filters apply to this overview; older records and proof remain stored.</p>}
       {rows.length ? <div className="sa-table-wrap" tabIndex={0} role="region" aria-label="Findings ordered by priority"><table className="sa-table sa-findings-table"><thead><tr><th scope="col">Priority</th><th scope="col">Finding / indicator</th><th scope="col">Behavior</th><th scope="col">Confidence</th><th scope="col">Reputation</th><th scope="col">Retained proof events</th><th scope="col">Last seen</th><th scope="col">Status / assignee</th></tr></thead>
         <tbody>{rows.slice(current * 40, current * 40 + 40).map(finding => <tr key={finding.id}>
           <td><strong className="sa-number">{count(finding.priority)}</strong><Badge tone={finding.severity === "critical" || finding.severity === "high" ? "error" : finding.severity === "medium" ? "warning" : "neutral"}>{finding.severity}</Badge></td>
@@ -656,8 +662,38 @@ function Findings({ state, health, onInspect, onClear, disabled }: {
   </>;
 }
 
-function FindingInspector({ finding, investigation, api, action, busy, mutationError, onClose }: {
-  finding: Finding; investigation: Investigation | undefined; api: Api; action: Action; busy: string; mutationError: string; onClose: () => void;
+function FindingDetails({ summary, api, action, busy, mutationError, onClose }: {
+  summary: FindingSummary; api: Api; action: Action; busy: string; mutationError: string; onClose: () => void;
+}) {
+  const [details, setDetails] = useState<{ finding: Finding; investigation?: Investigation | null } | null>(null);
+  const [error, setError] = useState("");
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      try {
+        const result = await api<{ finding: Finding; investigation?: Investigation | null }>(`/findings/${encodeURIComponent(summary.id)}`, { signal: controller.signal });
+        if (!record(result) || !record(result.finding) || result.finding.id !== summary.id || !Array.isArray(result.finding.evidence) || !Array.isArray(result.finding.reasons) || !Array.isArray(result.finding.limitations)) throw new Error("Server returned invalid finding details.");
+        if (!controller.signal.aborted) { setDetails(result); setError(""); }
+      } catch (caught) { if (!controller.signal.aborted && !aborted(caught)) setError(errorMessage(caught)); }
+      finally { if (!controller.signal.aborted) timer = setTimeout(() => void poll(), 10_000); }
+    };
+    void poll();
+    return () => { controller.abort(); clearTimeout(timer); };
+  }, [api, summary.id, retry]);
+  const detailAction: Action = async (key, path, body, method) => {
+    const ok = await action(key, path, body, method);
+    if (ok) setRetry(value => value + 1);
+    return ok;
+  };
+  const feedback = <><Feedback error={error ? `${details ? "Detail refresh failed. Showing previously loaded details. " : ""}${error}` : undefined} />{error && <button className="sa-button" onClick={() => setRetry(value => value + 1)}><RefreshCw size={16} aria-hidden="true" />Retry details</button>}</>;
+  if (!details) return <Modal title={summary.title} onClose={onClose}>{error ? feedback : <p role="status"><LoaderCircle className="sa-spin" size={16} aria-hidden="true" />Loading finding details...</p>}</Modal>;
+  return <FindingInspector finding={details.finding} investigation={details.investigation ?? undefined} api={api} action={detailAction} busy={busy} mutationError={mutationError} detailFeedback={feedback} onClose={onClose} />;
+}
+
+function FindingInspector({ finding, investigation, api, action, busy, mutationError, detailFeedback, onClose }: {
+  finding: Finding; investigation: Investigation | undefined; api: Api; action: Action; busy: string; mutationError: string; detailFeedback: React.ReactNode; onClose: () => void;
 }) {
   const [status, setStatus] = useState(finding.status);
   const [assignedTo, setAssignedTo] = useState(finding.assignedTo ?? "");
@@ -688,6 +724,7 @@ function FindingInspector({ finding, investigation, api, action, busy, mutationE
   const proofPages = Math.max(1, Math.ceil(finding.evidence.length / 20));
   const currentProofPage = Math.min(proofPage, proofPages - 1);
   return <Modal title={finding.title} onClose={onClose}>
+    {detailFeedback}
     <div className="sa-inspector-summary"><code>{finding.indicator}</code><Badge>{finding.indicatorType}</Badge><Badge tone={finding.severity === "critical" || finding.severity === "high" ? "error" : "warning"}>{finding.severity}</Badge><Badge>{human(finding.status)}</Badge></div>
     <dl className="sa-facts"><div><dt>Priority</dt><dd>{finding.priority}</dd></div><div><dt>Behavior score</dt><dd>{finding.behaviorScore}</dd></div><div><dt>Confidence</dt><dd>{finding.confidence}</dd></div><div><dt>Retained proof events</dt><dd>{count(finding.count)}</dd></div><div><dt>First seen</dt><dd>{date(finding.firstSeen)}</dd></div><div><dt>Last seen</dt><dd>{date(finding.lastSeen)}</dd></div><div><dt>Category</dt><dd>{finding.category}</dd></div><div><dt>Fingerprint</dt><dd><code>{finding.fingerprint}</code></dd></div></dl>
     <section className="sa-section"><h3>Behavioral reasons</h3>{finding.reasons.length ? <ul className="sa-list">{finding.reasons.map((reason, i) => <li key={i}>{reason}</li>)}</ul> : <p className="sa-muted">No behavioral reasons reported.</p>}</section>
@@ -710,7 +747,7 @@ function FindingInspector({ finding, investigation, api, action, busy, mutationE
       {proof && <div className="sa-raw-event"><h4>Raw event: {proof.eventId}</h4>{proofLoading && <p role="status">Fetching event...</p>}<Feedback error={proofError} />{proofError && <button className="sa-button" onClick={() => setProofRetry(value => value + 1)}><RefreshCw size={16} aria-hidden="true" />Retry event</button>}{raw && <pre tabIndex={0}>{raw}</pre>}</div>}
     </section>
     <form className="sa-section" onSubmit={event => { event.preventDefault(); setSaved(""); void action("finding", `/findings/${encodeURIComponent(finding.id)}`, { status, assignedTo: assignedTo.trim(), ...(note.trim() ? { note: note.trim() } : {}) }, "PATCH").then(ok => { if (ok) { setNote(""); setDirty(false); setSaved("Finding updated."); } }); }}>
-      <h3>Disposition</h3><div className="sa-form-grid"><Field label="Status"><select value={status} onChange={event => { setStatus(event.target.value as FindingStatus); setDirty(true); }}><option value="open">Open</option><option value="acknowledged">Acknowledged</option><option value="resolved">Resolved</option><option value="false_positive">False positive</option></select></Field><Field label="Assigned to"><input value={assignedTo} onChange={event => { setAssignedTo(event.target.value); setDirty(true); }} maxLength={200} /></Field><Field label="Add audit note" wide><textarea value={note} onChange={event => { setNote(event.target.value); setDirty(true); }} rows={3} maxLength={2000} /></Field></div>
+      <h3>Disposition</h3><div className="sa-form-grid"><Field label="Status"><select value={status} onChange={event => { setStatus(event.target.value as FindingStatus); setDirty(true); }}><option value="open">Open</option><option value="acknowledged">Acknowledged</option><option value="resolved">Resolved</option><option value="false_positive">False positive</option></select></Field><Field label="Assigned to"><input value={assignedTo} onChange={event => { setAssignedTo(event.target.value); setDirty(true); }} maxLength={200} /></Field><Field label="Add audit note" wide><textarea aria-label="Add audit note" value={note} onChange={event => { setNote(event.target.value); setDirty(true); }} rows={3} maxLength={2000} /></Field></div>
       {finding.notes != null && <details className="sa-details"><summary>Existing notes</summary><pre>{typeof finding.notes === "string" ? finding.notes : JSON.stringify(finding.notes, null, 2)}</pre></details>}
       <Feedback error={mutationError} success={saved} /><button className="sa-button sa-primary" disabled={!!busy || !dirty}><Save size={16} aria-hidden="true" />{busy === "finding" ? "Saving..." : "Save disposition"}</button>
     </form>

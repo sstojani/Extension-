@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.2 - 2026-10-04
+
+- Fix oversized Server Agent state refreshes by sending compact finding, investigation and run summaries, without bulk evidence, review notes, investigation timelines or snapshot cursors. Project records individually to avoid retaining all full proof bundles in overview memory.
+- Load authenticated finding/investigation details on demand; preserve previously loaded details on refresh failure with an explicit retry. Keep raw-event authorization, alert context and the console's response size safeguards.
+- Report overview record/byte limits explicitly without deleting retained evidence. Include exact response byte lengths and keep review-action responses compact.
+- Add oversized retained-history/API regressions and production browser checks for detail loading, retry, review, raw proof and desktop/mobile layouts.
+
 ## 0.16.1 - 2026-10-04
 
 - Verify Chrome-profile integration-key writes and show unavailable status instead of falsely reporting missing keys. Blank submissions preserve saved keys; extension reloads in the same profile/install retain them.

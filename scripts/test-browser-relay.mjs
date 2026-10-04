@@ -3,12 +3,26 @@ import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Store } from "../apps/server/store.mjs";
 
 // Real production web/API/worker with a deterministic extension transport fixture.
 const { chromium } = await import(process.env.SOC_WATCH_PLAYWRIGHT_MODULE || "playwright");
 const root = fileURLToPath(new URL("..", import.meta.url));
 const data = resolve(root, ".data", `relay-browser-${Date.now()}`);
 await mkdir(data, { recursive: true });
+const fixtureStore = new Store(resolve(data, "soc-watch.sqlite"));
+const retainedAt = new Date(Date.now() - 8 * 3600000).toISOString();
+try {
+  fixtureStore.transaction(() => {
+    for (let i = 0; i < 96; i++) fixtureStore.record("finding", { id: `retained-${i}`, fingerprint: `retained-${i}`, title: `Retained fixture finding ${i}`, indicatorType: "ip", indicator: "185.220.101.4",
+      category: "fixture_history", priority: 40, confidence: 70, behaviorScore: 30, severity: "medium", status: "open", count: 50, reputation: null,
+      firstSeen: retainedAt, lastSeen: retainedAt, reasons: ["Retained fixture reason"], limitations: ["Fixture evidence is sampled"],
+      evidence: [{ index: "logs-network", eventId: "retained-proof", timestamp: retainedAt, reason: "Retained proof" }],
+      notes: Array.from({ length: 100 }, (_, n) => ({ text: `Note ${n}: `.padEnd(2000, "x") })) });
+    fixtureStore.record("investigation", { id: "retained-0", status: "complete", completedAt: retainedAt, briefing: "Retained fixture investigation briefing", facts: [{ claim: "Retained fixture fact" }], timeline: [{ eventId: "retained-proof" }] });
+  });
+  assert.ok(Buffer.byteLength(JSON.stringify(fixtureStore.list("finding"))) > 8 * 1024 * 1024, "Stored detail fixture must exceed the old state limit");
+} finally { fixtureStore.close(); }
 const token = "browser-regression-only-".repeat(3), port = process.env.SOC_WATCH_TEST_PORT || "5197";
 const origin = `http://127.0.0.1:${port}`;
 const server = spawn(process.execPath, ["scripts/serve-web.mjs"], { cwd: root, windowsHide: true, stdio: "pipe", env: {
@@ -36,6 +50,9 @@ try {
     throw new Error(`Timed out waiting for agent state: ${JSON.stringify(state.status)}`);
   };
   const errors = []; page.on("pageerror", error => errors.push(error.message));
+  const stateSizes = [], detailRequests = [];
+  page.on("response", response => { if (response.url().endsWith("/api/agent/state")) stateSizes.push(Number(response.headers()["content-length"])); });
+  page.on("request", request => { if (request.url().includes("/api/agent/findings/")) detailRequests.push(request.url()); });
   await page.addInitScript(() => {
     window.fixtureNotifications = [];
     window.Notification = class {
@@ -186,13 +203,20 @@ try {
   const fresh = await page.evaluate(async () => (await (await fetch("/api/agent/state")).json()));
   assert.equal(fresh.status.live.evidenceRead, 6);
   const probing = fresh.findings.find(finding => finding.category === "scan");
-  assert.equal(probing.activity.allowed[0].action, "accept");
-  assert.deepEqual(probing.activity.countries, ["Kazakhstan"]);
+  assert.equal(probing.activity, undefined, "Overview must not repeat full evidence details");
+  assert.equal(detailRequests.length, 0, "Detailed findings must load only on inspection");
   await page.waitForFunction(() => window.fixtureNotifications.some(item => item.title === "Active probing with accepted network activity"));
   const notification = await page.evaluate(() => window.fixtureNotifications.find(item => item.title === "Active probing with accepted network activity"));
   assert.match(notification.body, /edge-/); assert.match(notification.body, /Kazakhstan/); assert.match(notification.body, /accept/);
   await page.getByRole("button", { name: "Active probing with accepted network activity", exact: true }).click();
   await page.getByRole("heading", { name: "Observed activity", exact: true }).waitFor();
+  const detail = await page.evaluate(async id => (await (await fetch(`/api/agent/findings/${encodeURIComponent(id)}`)).json()), probing.id);
+  assert.equal(detail.finding.activity.allowed[0].action, "accept");
+  assert.deepEqual(detail.finding.activity.countries, ["Kazakhstan"]);
+  const proofId = detail.finding.evidence[0].eventId;
+  await page.getByRole("button", { name: `Inspect event ${proofId}`, exact: true }).click();
+  await page.getByRole("heading", { name: `Raw event: ${proofId}`, exact: true }).waitFor();
+  await page.waitForFunction(() => document.querySelector(".sa-raw-event pre")?.textContent.includes("source.ip"));
   await page.screenshot({ path: resolve(data, "desktop-live-evidence.png"), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: resolve(data, "mobile-live-evidence.png"), fullPage: true });
@@ -247,8 +271,40 @@ try {
   assert.equal(await page.getByLabel("ThreatFox Auth-Key", { exact: true }).inputValue(), "");
   assert.equal(await page.getByLabel("ThreatFox Auth-Key", { exact: true }).getAttribute("placeholder"), "Saved; leave blank to keep");
   assert.equal(await page.evaluate(() => JSON.stringify(localStorage).includes("fixture-threatfox-secret")), false);
+  await page.getByRole("button", { name: "Findings", exact: true }).click();
+  await page.getByLabel("Finding time scope", { exact: true }).selectOption("retained");
+  let failDetails = true, delayDetails = true;
+  await page.route("**/api/agent/findings/retained-0", async route => {
+    if (failDetails) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "Fixture detail temporarily unavailable" }) });
+    if (delayDetails) { delayDetails = false; await new Promise(resolve => setTimeout(resolve, 11000)); }
+    return route.continue();
+  });
+  await page.getByRole("button", { name: "Retained fixture finding 0", exact: true }).click();
+  await page.getByText("Fixture detail temporarily unavailable", { exact: true }).waitFor();
+  assert.equal(await page.getByText("State refresh failed", { exact: false }).count(), 0, "Detail failures must not break state refresh");
+  failDetails = false;
+  await page.getByRole("button", { name: "Retry details", exact: true }).click();
+  await page.getByText("Retained fixture investigation briefing", { exact: true }).waitFor();
+  await page.getByRole("heading", { name: "Proof references", exact: true }).waitFor();
+  failDetails = true;
+  await page.getByLabel("Add audit note", { exact: true }).fill("Unsaved review survives refresh");
+  await page.getByText("Detail refresh failed. Showing previously loaded details. Fixture detail temporarily unavailable", { exact: true }).waitFor();
+  assert.equal(await page.getByLabel("Add audit note", { exact: true }).inputValue(), "Unsaved review survives refresh");
+  assert.equal(await page.getByText("Retained fixture investigation briefing", { exact: true }).count(), 1);
+  failDetails = false;
+  await page.getByRole("button", { name: "Retry details", exact: true }).click();
+  await page.getByText("Detail refresh failed.", { exact: false }).waitFor({ state: "hidden" });
+  await page.getByLabel("Add audit note", { exact: true }).fill("Browser retained-detail regression note");
+  await page.getByRole("button", { name: "Save disposition", exact: true }).click();
+  await page.getByText("Finding updated.", { exact: true }).waitFor();
+  const retainedDetail = await page.evaluate(async () => (await (await fetch("/api/agent/findings/retained-0")).json()));
+  assert.equal(retainedDetail.finding.notes.length, 100); assert.equal(retainedDetail.finding.notes.at(-1).text, "Browser retained-detail regression note");
+  await page.screenshot({ path: resolve(data, "mobile-retained-details.png"), fullPage: true });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, "Mobile retained-detail overflow");
+  await page.getByRole("button", { name: "Close dialog", exact: true }).click();
+  assert.ok(stateSizes.length > 5 && stateSizes.every(size => size > 0 && size < 8 * 1024 * 1024), `State responses must stay bounded: ${stateSizes}`);
   assert.deepEqual(errors, []);
-  console.log(`Browser relay regression passed: desktop/mobile, integration persistence/privacy, browser GTI enrichment, bounded fresh detection with accepted-event context, instrumented browser notifications, settings/permission failures, explicit data-view selection, large/rotated snapshot pagination, watch alert, auth loss and automatic recovery. Screenshots: ${data}`);
+  console.log(`Browser relay regression passed: desktop/mobile, oversized retained-history overview, on-demand details, detail retry and disposition, raw proof, integration persistence/privacy, browser GTI enrichment, bounded fresh detection with accepted-event context, instrumented browser notifications, settings/permission failures, explicit data-view selection, large/rotated snapshot pagination, watch alert, auth loss and automatic recovery. Maximum state bytes: ${Math.max(...stateSizes)}. Screenshots: ${data}`);
 } catch (error) {
   await page?.screenshot({ path: resolve(data, "failure.png"), fullPage: true }).catch(() => {});
   console.error(`Browser test failure screenshot: ${data}`);

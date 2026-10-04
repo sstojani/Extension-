@@ -2,6 +2,7 @@ import { randomBytes, timingSafeEqual, randomUUID } from "node:crypto";
 import { validateConfig } from "./config.mjs";
 import { validateRule, validateNotifications } from "./alerts.mjs";
 import { relaySourceSchema, RELAY_MAX_BYTES } from "@soc-watch/protocol";
+import { findingSummary } from "./console-state.mjs";
 
 export function createAgentApi(worker, runtime, version = "0.15.0") {
   const sessions = new Map(), failures = new Map();
@@ -24,8 +25,9 @@ export function createAgentApi(worker, runtime, version = "0.15.0") {
     try { url = new URL(request.url || "/", "http://localhost"); } catch { return false; }
     if (!url.pathname.startsWith("/api/agent/")) return false;
     const json = (status, body, headers = {}) => {
-      response.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", ...headers });
-      response.end(JSON.stringify(body)); return true;
+      const payload = JSON.stringify(body);
+      response.writeHead(status, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload), "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", ...headers });
+      response.end(payload); return true;
     };
     const route = url.pathname.slice("/api/agent/".length);
     if (route === "status" && request.method === "GET") return json(200, { available: true, configured: worker.configured(), authenticated: Boolean(authenticated(request)), version,
@@ -134,9 +136,10 @@ export function createAgentApi(worker, runtime, version = "0.15.0") {
       if (route.startsWith("rules/") && request.method === "DELETE") {
         const id = decodeURIComponent(route.slice(6)); store.remove("rule", id); store.audit("rule.removed", { id }); return json(200, { removed: true });
       }
-      if (route.startsWith("findings/") && request.method === "PATCH") {
+      if (route.startsWith("findings/") && ["GET", "PATCH"].includes(request.method)) {
         const id = decodeURIComponent(route.slice(9)), finding = store.one("finding", id);
         if (!finding) return json(404, { error: "Finding not found" });
+        if (request.method === "GET") return json(200, { finding, investigation: store.one("investigation", id) });
         const body = await readBody(request);
         if (body.status && !["open", "acknowledged", "resolved", "false_positive"].includes(body.status)) throw new Error("Invalid finding status.");
         if (body.assignedTo !== undefined && (typeof body.assignedTo !== "string" || body.assignedTo.length > 200)) throw new Error("Invalid assignee.");
@@ -145,7 +148,7 @@ export function createAgentApi(worker, runtime, version = "0.15.0") {
         if (body.assignedTo !== undefined) finding.assignedTo = body.assignedTo;
         if (body.note) finding.notes = [...finding.notes, { text: body.note, at: new Date().toISOString() }].slice(-100);
         store.record("finding", finding); store.audit("finding.reviewed", { id, actor: session.user, ...body });
-        return json(200, { finding });
+        return json(200, { finding: findingSummary(finding) });
       }
       if (route === "clear" && request.method === "POST") {
         if ((await readBody(request)).confirm !== true) throw new Error("Confirm clearing findings.");

@@ -101,6 +101,26 @@ describe("server agent transport", () => {
     await expect(agentRequest("/evidence?index=logs&id=1", { maxBytes: 64 })).rejects.toThrow("size limit");
   });
 
+  it("keeps the console size safeguard and cancels oversized advertised responses before reading", async () => {
+    const cancel = vi.fn();
+    const response = new Response(new ReadableStream({ cancel }), { headers: { "content-length": String(9 * 1024 * 1024) } });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+    await expect(agentRequest("/state")).rejects.toThrow("size limit");
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("loads individual finding details using the same cookie session and preserved size bound", async () => {
+    const item: Finding = { id: "stored/one", fingerprint: "stored/one", title: "Retained finding", category: "scan", indicator: "185.220.101.4", indicatorType: "ip",
+      priority: 90, severity: "high", behaviorScore: 80, confidence: 85, reputation: null, status: "open", count: 40,
+      firstSeen: at, lastSeen: at, evidence: [{ index: "logs-network", eventId: "proof", timestamp: at, reason: "Blocked" }], reasons: ["Corroborated fanout"], limitations: ["Sampled"] };
+    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ finding: item, investigation: { id: item.id, status: "complete", timeline: ["Retained"] } })));
+    vi.stubGlobal("fetch", fetcher);
+    const result = await agentRequest(`/findings/${encodeURIComponent(item.id)}`);
+    expect(fetcher.mock.calls[0]?.[0]).toBe("/api/agent/findings/stored%2Fone");
+    expect(fetcher.mock.calls[0]?.[1]).toMatchObject({ method: "GET", credentials: "same-origin", cache: "no-store" });
+    expect(result).toMatchObject({ finding: { evidence: item.evidence, reasons: item.reasons }, investigation: { timeline: ["Retained"] } });
+  });
+
   it("forwards aborts to the transport", async () => {
     const source = new AbortController();
     vi.stubGlobal("fetch", vi.fn((_url, options: RequestInit) => new Promise((_resolve, reject) => {
