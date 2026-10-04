@@ -12,6 +12,44 @@ export const relayPolicySchema = z.object({
 }).strict();
 export type RelayPolicy = z.infer<typeof relayPolicySchema>;
 
+export function hasUsableGtiAssessment(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const a = value as Record<string, unknown>;
+  const stats = a.last_analysis_stats as Record<string, unknown> | undefined;
+  const gti = a.gti_assessment as Record<string, unknown> | undefined;
+  const unwrap = (v: unknown): unknown => v && typeof v === "object" ? (v as Record<string, unknown>).value : v;
+  return !!stats && !Array.isArray(stats) && ["malicious", "suspicious", "harmless", "undetected"].some(name => typeof stats[name] === "number" && Number.isInteger(stats[name]) && stats[name]! >= 0)
+    || !!gti && !Array.isArray(gti) && (/^(?:VERDICT_)?(?:UNKNOWN|BENIGN|UNDETECTED|SUSPICIOUS|MALICIOUS)$/i.test(String(unwrap(gti.verdict) ?? ""))
+      || typeof unwrap(gti.threat_score) === "number" && Number.isFinite(unwrap(gti.threat_score)) && Number(unwrap(gti.threat_score)) >= 0 && Number(unwrap(gti.threat_score)) <= 100);
+}
+
+export function isPublicReputationTarget(type: string, value: string): boolean {
+  if (value.length > 253) return false;
+  if (type === "hash") return /^(?:[a-f0-9]{32}|[a-f0-9]{40}|[a-f0-9]{64})$/i.test(value);
+  if (type === "domain") return /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i.test(value)
+    && !/\.(?:local|internal|lan|home|test|invalid|example)$/i.test(value);
+  if (type !== "ip" || !z.string().ip().safeParse(value).success) return false;
+  if (value.includes(":")) {
+    const canonical = new URL(`http://[${value}]`).hostname.slice(1, -1);
+    return !/^(?:::|f[cd]|fe[89ab]|ff|2001:db8:)/i.test(canonical);
+  }
+  const [a, b, c] = value.split(".").map(Number);
+  return !(a === 0 || a === 10 || a === 127 || a! >= 224 || (a === 169 && b === 254)
+    || (a === 172 && b! >= 16 && b! <= 31) || (a === 192 && b === 168) || (a === 100 && b! >= 64 && b! <= 127)
+    || (a === 198 && [18, 19].includes(b!)) || (a === 192 && b === 0) || (a === 198 && b === 51 && c === 100)
+    || (a === 203 && b === 0 && c === 113));
+}
+export const relayReputationTargetSchema = z.object({ type: z.enum(["ip", "domain", "hash"]), value: z.string().min(1).max(253) })
+  .strict().refine(target => isPublicReputationTarget(target.type, target.value), "Only public IPs, domains and hashes may be looked up");
+export const relayReputationResultSchema = z.object({
+  status: z.enum(["scored", "not_found", "not_configured", "pending", "rate_limited", "unauthorized", "unavailable"]),
+  verdict: z.enum(["unknown", "benign", "undetected", "suspicious", "malicious"]),
+  score: z.number().min(0).max(100).nullable().optional(), malicious: z.number().int().nonnegative().max(10000).optional(),
+  suspicious: z.number().int().nonnegative().max(10000).optional(), vendors: z.number().int().nonnegative().max(10000).optional(),
+  gtiVerdict: z.string().max(200).nullable().optional(), cached: z.boolean().optional(), checkedAt: z.string().datetime().optional()
+}).strict().refine(result => result.status !== "scored" || result.score !== undefined && result.malicious !== undefined && result.suspicious !== undefined,
+  "A scored report requires assessment fields");
+
 const scalar = (value: unknown) => typeof value === "string" && value.length <= 2048 || typeof value === "number" && Number.isFinite(value) || typeof value === "boolean";
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 // Accept only the small query DSL used by collection, watches and investigations.
@@ -36,6 +74,7 @@ function readQuery(value: unknown, depth = 0, budget = { nodes: 0 }): boolean {
     && Object.entries(term).every(([key, v]) => key === "value" || key === "case_insensitive" && typeof v === "boolean");
 }
 export const relayOperationSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("reputation"), target: relayReputationTargetSchema }).strict(),
   z.object({ kind: z.literal("openPit"), indexPattern: relayPolicySchema.shape.indexPattern }).strict(),
   z.object({ kind: z.literal("closePit"), id: relayPitIdSchema }).strict(),
   z.object({ kind: z.literal("fieldCaps"), indexPattern: relayPolicySchema.shape.indexPattern, fields: z.array(field).min(1).max(100) }).strict(),
@@ -57,7 +96,7 @@ export const relaySourceSchema = z.object({
   kibanaBaseUrl: z.string().url().max(2048).refine(value => {
     const url = new URL(value);
     return ["https:", "http:"].includes(url.protocol) && !url.username && !url.password && !url.search && !url.hash;
-  }), spaceId: z.string().max(128), policy: relayPolicySchema
+  }), spaceId: z.string().max(128), policy: relayPolicySchema, reputationConfigured: z.boolean().optional(), reputationRevision: z.string().uuid().optional()
 }).strict();
 export type RelaySource = z.infer<typeof relaySourceSchema>;
 export const RELAY_MAX_BYTES = 8 * 1024 * 1024;

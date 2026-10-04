@@ -48,6 +48,7 @@ import {
 import { deriveConnectionHealth, type ConnectionState } from "./connection-health";
 import { normalizeThreatRadarAgentConfig } from "./threat-radar-policy";
 import { ServerBrowserRelay } from "./server-relay";
+import { saveIntegrationKeys } from "./integration-keys";
 const serverBrowserRelay = new ServerBrowserRelay();
 
 const THREAT_RADAR_AGENT_ALARM = "soc-watch-threat-radar-agent";
@@ -580,27 +581,10 @@ async function getBridgeConfig(params: unknown = {}): Promise<unknown> {
 
 async function saveBridgeConfig(params: unknown): Promise<unknown> {
   const record = asRecord(params);
-  const updates: Record<string, string> = {};
-
-  if (typeof record.threatFoxAuthKey === "string") {
-    const key = record.threatFoxAuthKey.trim();
-    if (key) updates.threatFoxAuthKey = key;
-  }
-  if (typeof record.malwareBazaarAuthKey === "string") {
-    const key = record.malwareBazaarAuthKey.trim();
-    if (key) updates.malwareBazaarAuthKey = key;
-  }
-  if (typeof record.googleThreatIntelApiKey === "string") {
-    const key = record.googleThreatIntelApiKey.trim();
-    if (key) updates.googleThreatIntelApiKey = key;
-  }
-
-  if (Object.keys(updates).length > 0) {
-    await chrome.storage.local.set(updates);
-    if (updates.googleThreatIntelApiKey) {
-      resetGtiLookupState();
-      await chrome.storage.local.remove("gtiReputationCacheV1");
-    }
+  const { gtiChanged } = await saveIntegrationKeys(record);
+  if (gtiChanged) {
+    resetGtiLookupState();
+    await chrome.storage.local.remove("gtiReputationCacheV1");
   }
 
   return getBridgeConfig();

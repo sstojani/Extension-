@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.16.1 - 2026-10-04
+
+- Verify Chrome-profile integration-key writes and show unavailable status instead of falsely reporting missing keys. Blank submissions preserve saved keys; extension reloads in the same profile/install retain them.
+- Load the server's optional root `.env` or explicit `SOC_WATCH_ENV_FILE` at startup, without overriding service environment settings or exposing secrets in Vite assets.
+- Add administrator-only Server Agent Integrations with atomic, permission-restricted key storage in the persistent data directory. Environment-managed keys remain authoritative; removal is explicit and responses/audit contain status flags only.
+- Enrich agent IP/domain/hash reputation through the authenticated browser relay's saved GTI key without exporting it, or use a server-managed key. Request GTI assessment metadata, distinguish unknown/unavailable from benign, prioritize active findings, and persist provider backoff.
+- Add restart, storage failure, secret-redaction, permission, provider-response and browser-relay regressions. Live provider entitlement, organization connectivity and operating-system notification delivery remain deployment checks.
+
 ## 0.16.0 - 2026-10-03
 
 - Separate fresh live detection from historical pagination, reputation retries, investigations and feed collection. Prioritize fixed-window live jobs in the authenticated browser relay; raw Today/Baseline collection remains optional background work.

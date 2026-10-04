@@ -583,6 +583,7 @@ function App() {
   const [malwareBazaarAuthKeySaved, setMalwareBazaarAuthKeySaved] = useState(false);
   const [googleThreatIntelApiKey, setGoogleThreatIntelApiKey] = useState("");
   const [googleThreatIntelApiKeySaved, setGoogleThreatIntelApiKeySaved] = useState(false);
+  const [apiKeyStatus, setApiKeyStatus] = useState("Checking saved keys");
   const [threatRadarAgent, setThreatRadarAgent] = useState<ThreatRadarAgentConfig>({
     enabled: true,
     intervalMinutes: 5,
@@ -639,6 +640,14 @@ function App() {
     const refresh = window.setInterval(() => void loadBridgeConfig(true), 15000);
     return () => window.clearInterval(refresh);
   }, [active]);
+
+  useEffect(() => {
+    if (active !== "Settings" || extensionPresence !== "installed") return;
+    const refresh = () => void loadBridgeConfig(false);
+    refresh(); window.addEventListener("focus", refresh);
+    const timer = window.setInterval(refresh, 15000);
+    return () => { window.removeEventListener("focus", refresh); window.clearInterval(timer); };
+  }, [active, extensionPresence]);
 
   async function verifyExtensionInstallation(background = false) {
     const generation = extensionDetectionGenerationRef.current + 1;
@@ -791,6 +800,7 @@ function App() {
   async function loadBridgeConfig(includeReport = false) {
     const response = await sendBridgeMessage<{ includeReport: boolean }, BridgeConfigResponse>("config.get", { includeReport });
     if (response.success) {
+      setApiKeyStatus("Saved keys checked");
       setExtensionVersion(response.data.extensionVersion ?? null);
       setThreatFoxAuthKeySaved(Boolean(response.data.threatFoxAuthKeySaved));
       setMalwareBazaarAuthKeySaved(Boolean(response.data.malwareBazaarAuthKeySaved));
@@ -807,6 +817,8 @@ function App() {
       if (response.data.threatRadarAgentState) {
         setThreatRadarAgentState(response.data.threatRadarAgentState);
       }
+    } else {
+      setApiKeyStatus("Saved-key status unavailable; reconnect the extension");
     }
   }
 
@@ -819,6 +831,7 @@ function App() {
       googleThreatIntelApiKey
     });
     if (response.success) {
+      setApiKeyStatus("API keys saved and verified in this Chrome profile");
       setThreatFoxAuthKey("");
       setMalwareBazaarAuthKey("");
       setGoogleThreatIntelApiKey("");
@@ -1165,6 +1178,7 @@ function App() {
             malwareBazaarAuthKeySaved={malwareBazaarAuthKeySaved}
             googleThreatIntelApiKey={googleThreatIntelApiKey}
             googleThreatIntelApiKeySaved={googleThreatIntelApiKeySaved}
+            apiKeyStatus={apiKeyStatus}
             onIndexPatternChange={setIndexPattern}
             onExtensionIdChange={setExtensionId}
             onThreatFoxAuthKeyChange={setThreatFoxAuthKey}
@@ -1594,6 +1608,7 @@ function SettingsPanel({
   malwareBazaarAuthKeySaved,
   googleThreatIntelApiKey,
   googleThreatIntelApiKeySaved,
+  apiKeyStatus,
   onIndexPatternChange,
   onExtensionIdChange,
   onThreatFoxAuthKeyChange,
@@ -1619,6 +1634,7 @@ function SettingsPanel({
   malwareBazaarAuthKeySaved: boolean;
   googleThreatIntelApiKey: string;
   googleThreatIntelApiKeySaved: boolean;
+  apiKeyStatus: string;
   onIndexPatternChange: (value: string) => void;
   onExtensionIdChange: (value: string) => void;
   onThreatFoxAuthKeyChange: (value: string) => void;
@@ -1783,7 +1799,7 @@ function SettingsPanel({
         </div>
         <div className="settings-action-row">
           <span className="muted">
-            ThreatFox {threatFoxAuthKeySaved ? "key saved" : "key missing"} | MalwareBazaar {malwareBazaarAuthKeySaved ? "key saved" : "key optional/missing"} | GTI {googleThreatIntelApiKeySaved ? "key saved" : "key missing"}
+            {apiKeyStatus === "Checking saved keys" || apiKeyStatus.includes("unavailable") ? apiKeyStatus : `ThreatFox ${threatFoxAuthKeySaved ? "key saved" : "key missing"} | MalwareBazaar ${malwareBazaarAuthKeySaved ? "key saved" : "key missing"} | GTI ${googleThreatIntelApiKeySaved ? "key saved" : "key missing"} | ${apiKeyStatus}`}
           </span>
           <button className="secondary align-end" onClick={onSaveApiKeys} disabled={!threatFoxAuthKey.trim() && !malwareBazaarAuthKey.trim() && !googleThreatIntelApiKey.trim()}>
             <ShieldCheck size={16} aria-hidden="true" />

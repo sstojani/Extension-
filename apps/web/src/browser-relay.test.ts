@@ -6,6 +6,39 @@ const policy = { indexPattern: "logs-*", timestampField: "@timestamp", infrastru
 const source = { kibanaBaseUrl: "https://kibana.internal", spaceId: "default", policy };
 const success = (data: unknown): BridgeResponse<unknown> => ({ version: 1, requestId: crypto.randomUUID(), success: true, data });
 
+it("transports bounded reputation reports without exposing keys or disconnecting for a provider failure", async () => {
+  const controller = new AbortController(); let polled = 0;
+  const bodies: unknown[] = [], progress = vi.fn();
+  const api = async <T,>(path: string, options: { body: unknown }) => {
+    if (path === "/relay/poll") { bodies.push(options.body); return { job: { id: crypto.randomUUID(), operation: { kind: "reputation", target: { type: "ip", value: "185.220.101.4" } } } } as T; }
+    if (path === "/relay/result") { bodies.push(options.body); if (++polled === 2) controller.abort(); }
+    return {} as T;
+  };
+  const bridge = async (action: BridgeAction): Promise<BridgeResponse<unknown>> => {
+    if (action === "agent.relay.connect") return success({ relayId: crypto.randomUUID(), source: { ...source, reputationConfigured: true } });
+    if (action === "agent.relay.execute") return { version: 1, requestId: crypto.randomUUID(), success: false, error: { code: "INTERNAL_ERROR", message: "Provider temporarily unavailable" } };
+    return success({});
+  };
+  await runBrowserRelay({ api, bridge, policy, signal: controller.signal, onProgress: progress, pollMs: 0 });
+  expect(polled).toBe(2); expect(bodies[0]).toMatchObject({ reputationConfigured: true });
+  expect(progress).not.toHaveBeenCalledWith(expect.objectContaining({ state: "disconnected" }));
+});
+
+it("disconnects when a reputation operation discovers an expired Kibana session", async () => {
+  const controller = new AbortController(), progress = vi.fn(); let connections = 0;
+  const api = async <T,>(path: string) => {
+    if (path === "/relay/connect" && ++connections === 2) controller.abort();
+    if (path === "/relay/poll") return { job: { id: crypto.randomUUID(), operation: { kind: "reputation", target: { type: "ip", value: "185.220.101.4" } } } } as T;
+    return {} as T;
+  };
+  const bridge = async (action: BridgeAction): Promise<BridgeResponse<unknown>> => action === "agent.relay.execute"
+    ? { version: 1, requestId: crypto.randomUUID(), success: false, error: { code: "KIBANA_AUTH_REQUIRED", message: "Sign in to Kibana" } }
+    : success({ relayId: crypto.randomUUID(), source: { ...source, reputationConfigured: true } });
+  await runBrowserRelay({ api, bridge, policy, signal: controller.signal, onProgress: progress, retryMs: 0 });
+  expect(progress).toHaveBeenCalledWith({ state: "disconnected", message: "Sign in to Kibana", retrying: true });
+  expect(connections).toBe(2);
+});
+
 it("pumps one authenticated job at a time and disconnects both transports on cancellation", async () => {
   const controller = new AbortController(), posts: { path: string; body: unknown; signal?: AbortSignal | undefined }[] = [];
   const api = async <T,>(path: string, options: { body: unknown; signal?: AbortSignal }) => {

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { normalizeEvent, analyzeEvidence, eventIndicators, liveScanCandidates, analyzeLiveScans, analyzeSiemAlerts, activityContext } from "./intelligence.mjs";
 import { defaults } from "./config.mjs";
-import { enrichQueue, publicIndicator } from "./reputation.mjs";
+import { enrichQueue, publicIndicator, reputationSource } from "./reputation.mjs";
 import { excluded, recordAlert, deliverQueue } from "./alerts.mjs";
 import { investigateFinding } from "./investigator.mjs";
 import { collectFeeds, campaignBatch, feedMatchQuery } from "./feeds.mjs";
@@ -114,7 +114,7 @@ export class AgentWorker {
       if (this.ready() && this.store.get("watchPending", 0) > 0 && this.store.get("watchLastAttempt") !== now) {
         await this.watchRules(config, new Date(Date.parse(now) - config.intervalMinutes * 60000).toISOString(), now);
       }
-      const enrichment = await enrichQueue(this.store, this.runtime, this.fetcher, this.clock());
+      const enrichment = await enrichQueue(this.store, this.runtime, this.fetcher, this.clock(), this.elastic.relay);
       if (enrichment.changed?.length) this.reconsiderIndicators(enrichment.changed, this.config(), this.clock());
       if (this.stopping) return;
       await this.deliver();
@@ -399,7 +399,8 @@ export class AgentWorker {
       rules: this.store.list("rule"), findings: this.store.list("finding", 2000).filter(finding => !excluded(finding, config, Date.parse(this.clock()))).sort((a,b) => b.priority - a.priority),
       alerts: this.store.list("alert", 200), runs: this.store.list("run", 30), deliveries: this.store.deliveries(),
       notifications: { ...notifications, channels: notifications.channels.map(({ url, token, chatId, ...c }) => ({ ...c, configured: Boolean(url || (token && chatId)) })) },
-      reputation: { configured: Boolean(this.runtime.gtiKey), pending: reps.filter(r => r.status === "pending").length,
+      integrations: this.runtime.integrations?.status(),
+      reputation: { configured: reputationSource(this.runtime, this.elastic.relay) !== "missing", source: reputationSource(this.runtime, this.elastic.relay), pending: reps.filter(r => r.status === "pending").length,
         unavailable: reps.filter(r => ["unavailable", "unauthorized", "rate_limited"].includes(r.status)).length,
         scored: reps.filter(r => r.status === "scored").length, notFound: reps.filter(r => r.status === "not_found").length },
       campaigns: this.store.list("campaign", 5).map(({ iocs, cursor, config, ...c }) => c), investigations: this.store.list("investigation", 100) };

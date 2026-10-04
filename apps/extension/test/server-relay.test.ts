@@ -19,14 +19,25 @@ function fixture() {
     if (endpoint === "/_search") return { pit_id: "pit-2", hits: { hits: [{ _index: ".ds-logs-network-default-2026.10.02-000001" }] } };
     return { succeeded: true };
   });
-  const relay = new ServerBrowserRelay({ config, tabs, request, clock: () => now });
-  return { relay, config, tabs, request, expire: () => { now += 90001; } };
+  const reputationConfigured = vi.fn(async () => false), reputation = vi.fn(async (_target: unknown) => ({ status: "not_configured" as const, verdict: "unknown" as const }));
+  const relay = new ServerBrowserRelay({ config, tabs, request, reputationConfigured, reputationRevision: async () => undefined, reputation, clock: () => now });
+  return { relay, config, tabs, request, reputationConfigured, reputation, expire: () => { now += 90001; } };
 }
 const body = { pit: { id: "pit", keep_alive: "10m" }, size: 500, track_total_hits: true, timeout: "20s",
   query: { bool: { filter: [{ range: { "@timestamp": { gte: "2026-10-02T10:00:00Z", lte: "2026-10-02T10:05:00Z" } } }] } },
   sort: [{ "@timestamp": { order: "asc", unmapped_type: "date" } }, { _shard_doc: "asc" }] };
 
 describe("extension server relay", () => {
+  it("advertises a saved browser key and performs only a fixed reputation lookup without exposing it", async () => {
+    const { relay, request, reputationConfigured, reputation } = fixture(); reputationConfigured.mockResolvedValue(true);
+    const connection = await relay.handle("agent.relay.connect", policy, owner) as { relayId: string; source: { reputationConfigured: boolean } };
+    expect(connection.source.reputationConfigured).toBe(true);
+    const reads = request.mock.calls.length;
+    await relay.handle("agent.relay.execute", { relayId: connection.relayId, jobId: crypto.randomUUID(), operation: { kind: "reputation", target: { type: "ip", value: "185.220.101.4" } } }, owner);
+    expect(reputation).toHaveBeenCalledWith({ type: "ip", value: "185.220.101.4" }); expect(request).toHaveBeenCalledTimes(reads);
+    await expect(relay.handle("agent.relay.execute", { relayId: connection.relayId, jobId: crypto.randomUUID(), operation: { kind: "reputation", target: { type: "domain", value: "user@internal" } } }, owner)).rejects.toThrow();
+    expect(reputation).toHaveBeenCalledTimes(1);
+  });
   it("constructs live queries in the extension and rejects out-of-scope nested proof", async () => {
     const { relay, request } = fixture();
     const connection = await relay.handle("agent.relay.connect", policy, owner) as { relayId: string };

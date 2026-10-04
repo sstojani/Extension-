@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RELAY_MAX_PIT_ID_BYTES, relayPitIdSchema, validateRelayOperation, relayLiveSearch } from "../src/index";
+import { RELAY_MAX_PIT_ID_BYTES, relayPitIdSchema, validateRelayOperation, relayLiveSearch, relayReputationResultSchema } from "../src/index";
 
 const policy = { indexPattern: "logs-*", timestampField: "@timestamp", infrastructureField: "observer.name" };
 const search = (id: string) => ({ kind: "search", body: {
@@ -9,6 +9,17 @@ const search = (id: string) => ({ kind: "search", body: {
 } });
 
 describe("relay snapshot limits", () => {
+  it("limits reputation requests to public indicators with no caller-controlled credentials or URL", () => {
+    for (const target of [{ type: "ip", value: "185.220.101.4" }, { type: "domain", value: "dangerous.com" }, { type: "hash", value: "a".repeat(64) }]) {
+      expect(validateRelayOperation({ kind: "reputation", target }, policy).kind).toBe("reputation");
+    }
+    for (const [type, value] of [["ip", "10.0.0.1"], ["ip", "0:0:0:0:0:0:0:1"], ["ip", "FC00::1"], ["ip", "::ffff:10.0.0.1"], ["domain", "email@apdurres"], ["domain", "internal.local"], ["hash", "nonsense"]]) {
+      expect(() => validateRelayOperation({ kind: "reputation", target: { type, value } }, policy)).toThrow();
+    }
+    expect(() => validateRelayOperation({ kind: "reputation", target: { type: "ip", value: "185.220.101.4" }, url: "https://evil.com", apiKey: "private" }, policy)).toThrow();
+    expect(() => relayReputationResultSchema.parse({ status: "scored", verdict: "benign" })).toThrow();
+    expect(() => relayReputationResultSchema.parse({ status: "unavailable", verdict: "unknown", apiKey: "private" })).toThrow();
+  });
   it.each([16385, 128 * 1024, RELAY_MAX_PIT_ID_BYTES])("preserves a %i-byte opaque ID in searches and cleanup", size => {
     const id = "p".repeat(size);
     expect(relayPitIdSchema.parse(id)).toBe(id);

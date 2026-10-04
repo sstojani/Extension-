@@ -49,6 +49,7 @@ try {
     window.fixturePermissionError = false;
     window.fixtureRotations = 0;
     window.fixtureClosedPits = 0;
+    window.fixtureGtiConfigured = false;
     let sequence = 0;
     const pits = new Set();
     const newPit = () => `fixture-pit-${++sequence}-`.padEnd(128 * 1024, "p");
@@ -79,12 +80,14 @@ try {
           success: false, error: { code: "KIBANA_AUTH_REQUIRED", message: "Kibana authentication is required." } } } }, window.location.origin); return;
       } else if (request.action === "agent.relay.connect") {
         pits.clear();
-        data = { relayId: crypto.randomUUID(), source: { kibanaBaseUrl: "https://kibana.internal:8888", spaceId: "default", policy: request.params } };
+        data = { relayId: crypto.randomUUID(), source: { kibanaBaseUrl: "https://kibana.internal:8888", spaceId: "default", policy: request.params,
+          reputationConfigured: window.fixtureGtiConfigured, reputationRevision: "57cc97aa-ea99-4c1a-bcd5-59b493536c67" } };
       }
-      else if (request.action === "agent.relay.heartbeat") data = { ready: true };
+      else if (request.action === "agent.relay.heartbeat") data = { ready: true, reputationConfigured: window.fixtureGtiConfigured, reputationRevision: "57cc97aa-ea99-4c1a-bcd5-59b493536c67" };
       else {
         const operation = request.params.operation;
-        if (operation.kind === "openPit") { const id = newPit(); pits.add(id); data = { id }; }
+        if (operation.kind === "reputation") data = { status: "scored", verdict: "malicious", score: 88, malicious: 5, suspicious: 0, vendors: 89, gtiVerdict: "VERDICT_MALICIOUS" };
+        else if (operation.kind === "openPit") { const id = newPit(); pits.add(id); data = { id }; }
         else if (operation.kind === "closePit") {
           if (!pits.delete(operation.id)) throw new Error("Cleanup did not use an owned, current snapshot ID");
           window.fixtureClosedPits++; data = { succeeded: true };
@@ -201,6 +204,10 @@ try {
   await page.screenshot({ path: resolve(data, "mobile-connected.png"), fullPage: true });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, "Mobile page overflow");
   await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.evaluate(() => { window.fixtureGtiConfigured = true; });
+  const scored = await waitState(state => state.findings.some(finding => finding.reputation?.status === "scored"));
+  assert.equal(scored.reputation.source, "browser");
+  assert.ok(scored.findings.some(finding => finding.reputation?.gtiVerdict === "VERDICT_MALICIOUS"), "Browser GTI assessment must enrich a real worker finding");
   await page.evaluate(() => { window.fixtureAuthenticated = false; });
   await page.getByRole("button", { name: "Scan", exact: true }).click();
   await waitState(state => state.status.paused);
@@ -221,8 +228,27 @@ try {
   await page.getByRole("button", { name: "Refresh state", exact: true }).click();
   await page.getByRole("button", { name: "Connect this browser", exact: true }).waitFor();
   assert.equal((await page.evaluate(async () => (await (await fetch("/api/agent/state")).json()))).status.dataSource.ready, false);
+  await page.getByRole("button", { name: "Integrations", exact: true }).click();
+  await page.getByLabel("ThreatFox Auth-Key", { exact: true }).fill("fixture-threatfox-secret");
+  await page.getByLabel("MalwareBazaar Auth-Key", { exact: true }).fill("fixture-malwarebazaar-secret");
+  await page.getByRole("button", { name: "Save server keys", exact: true }).click();
+  await page.getByText("Server integration keys saved.", { exact: false }).waitFor();
+  const saved = await waitState(state => state.integrations.threatfox.configured && state.integrations.malwarebazaar.configured);
+  assert.equal(JSON.stringify(saved).includes("fixture-threatfox-secret"), false, "API must never echo integration credentials");
+  assert.equal(await page.getByLabel("ThreatFox Auth-Key", { exact: true }).inputValue(), "");
+  await page.screenshot({ path: resolve(data, "desktop-integrations.png"), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: resolve(data, "mobile-integrations.png"), fullPage: true });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, "Mobile integration form overflow");
+  await page.reload();
+  await page.getByRole("button", { name: "Integrations", exact: true }).click();
+  await page.getByLabel("Remove saved threatfox key", { exact: true }).waitFor();
+  await page.getByText("GTI / VirusTotal (relay offline)", { exact: true }).waitFor();
+  assert.equal(await page.getByLabel("ThreatFox Auth-Key", { exact: true }).inputValue(), "");
+  assert.equal(await page.getByLabel("ThreatFox Auth-Key", { exact: true }).getAttribute("placeholder"), "Saved; leave blank to keep");
+  assert.equal(await page.evaluate(() => JSON.stringify(localStorage).includes("fixture-threatfox-secret")), false);
   assert.deepEqual(errors, []);
-  console.log(`Browser relay regression passed: desktop/mobile, bounded fresh detection with accepted-event context, instrumented browser notifications, settings/permission failures, explicit data-view selection, large/rotated snapshot pagination, watch alert, auth loss and automatic recovery. Screenshots: ${data}`);
+  console.log(`Browser relay regression passed: desktop/mobile, integration persistence/privacy, browser GTI enrichment, bounded fresh detection with accepted-event context, instrumented browser notifications, settings/permission failures, explicit data-view selection, large/rotated snapshot pagination, watch alert, auth loss and automatic recovery. Screenshots: ${data}`);
 } catch (error) {
   await page?.screenshot({ path: resolve(data, "failure.png"), fullPage: true }).catch(() => {});
   console.error(`Browser test failure screenshot: ${data}`);

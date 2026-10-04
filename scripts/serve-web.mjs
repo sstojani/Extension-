@@ -2,8 +2,10 @@ import { createReadStream, existsSync, statSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadServerEnvironment } from "./server-env.mjs";
 
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
+loadServerEnvironment(projectRoot);
 const webRoot = resolve(projectRoot, "apps", "web", "dist");
 const indexPath = resolve(webRoot, "index.html");
 const host = process.env.SOC_WATCH_HOST ?? "127.0.0.1";
@@ -16,6 +18,8 @@ if (process.env.SOC_WATCH_SERVER_AGENT === "true") {
     import("../apps/server/worker.mjs"), import("../apps/server/api.mjs")
   ]);
   const runtime = runtimeConfig();
+  const { Integrations } = await import("../apps/server/integrations.mjs");
+  runtime.integrations = new Integrations(runtime);
   store = new Store(resolve(runtime.dataDir, "soc-watch.sqlite"));
   worker = new AgentWorker(store, new ElasticClient(runtime), runtime);
   const version = JSON.parse(readFileSync(resolve(projectRoot, "package.json"), "utf8")).version;

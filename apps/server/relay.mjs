@@ -22,8 +22,10 @@ export class BrowserRelay {
     if (!this.status().ready || this.lease.session !== session || this.lease.clientId !== clientId) throw new Error("Browser relay lease expired or belongs to another session.");
     return this.lease;
   }
-  poll(session, clientId) {
+  poll(session, clientId, reputationConfigured, reputationRevision) {
     const lease = this.require(session, clientId);
+    if (typeof reputationConfigured === "boolean") lease.source.reputationConfigured = reputationConfigured;
+    if (typeof reputationRevision === "string" && /^[a-f0-9-]{36}$/i.test(reputationRevision)) lease.source.reputationRevision = reputationRevision;
     lease.expiresAt = this.clock() + this.ttl; lease.lastSeen = new Date(this.clock()).toISOString();
     const queued = [...this.jobs.values()].filter(job => !job.assigned);
     const job = queued.find(job => job.operation.kind === "live") || queued[0];

@@ -102,7 +102,7 @@ it("does not register a relay lease when real transport metadata works but Elast
   const { fetcher } = transport(false);
   fetcher.mockResolvedValueOnce(json({ fields: { "@timestamp": { date: { searchable: true } } } }, 200, "200"));
   fetcher.mockResolvedValueOnce(json({ error: { type: "security_exception", reason: sensitiveReason }, status: 403 }, 200, "403"));
-  const relay = new ServerBrowserRelay({ config: async () => config, tabs: async () => [{ url: `${config.kibanaBaseUrl}/app/discover` }], request: kibanaFetchJson, clock: Date.now });
+  const relay = new ServerBrowserRelay({ config: async () => config, tabs: async () => [{ url: `${config.kibanaBaseUrl}/app/discover` }], request: kibanaFetchJson, clock: Date.now, reputationConfigured: async () => false, reputationRevision: async () => undefined, reputation: async () => ({ status: "not_configured" as const, verdict: "unknown" as const }) });
   await expect(relay.handle("agent.relay.connect", policy, "console-tab")).rejects.toMatchObject({ code: "KIBANA_FORBIDDEN", message: expect.stringContaining("open a log snapshot") });
   expect(fetcher).toHaveBeenCalledTimes(2);
   const first = new URL(String(fetcher.mock.calls[0]![0]));
@@ -115,7 +115,7 @@ it("opens and closes a proof snapshot through real JSON transport before registe
   fetcher.mockResolvedValueOnce(json({ fields: { "@timestamp": { date: { searchable: true } } } }, 200, "200"));
   fetcher.mockResolvedValueOnce(json({ id: "proof-pit", _shards: { failed: 0 } }, 200, "200"));
   fetcher.mockResolvedValueOnce(json({ succeeded: true }, 200, "200"));
-  const relay = new ServerBrowserRelay({ config: async () => config, tabs: async () => [{ url: `${config.kibanaBaseUrl}/app/discover` }], request: kibanaFetchJson, clock: Date.now });
+  const relay = new ServerBrowserRelay({ config: async () => config, tabs: async () => [{ url: `${config.kibanaBaseUrl}/app/discover` }], request: kibanaFetchJson, clock: Date.now, reputationConfigured: async () => false, reputationRevision: async () => undefined, reputation: async () => ({ status: "not_configured" as const, verdict: "unknown" as const }) });
   await expect(relay.handle("agent.relay.connect", policy, "console-tab")).resolves.toHaveProperty("relayId");
   expect(JSON.parse(String(fetcher.mock.calls[2]![1]?.body))).toEqual({ id: "proof-pit" });
 });

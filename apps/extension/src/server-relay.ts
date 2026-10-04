@@ -3,7 +3,8 @@ import {
   buildQuery, kibanaApiPath, relayPolicySchema, relayIndexAllowed, relaySourceFields,
   validateRelayOperation, relayFieldCapsPath, relayLiveSearch, relayPitIdSchema, RELAY_MAX_PIT_ID_BYTES, RELAY_MAX_BYTES, type RelaySource
 } from "@soc-watch/protocol";
-import { BridgeOperationError, kibanaFetchJson, readRuntimeConfig } from "./kibana";
+import { BridgeOperationError, kibanaFetchJson, readRuntimeConfig, lookupRelayReputation } from "./kibana";
+import { hasBrowserGtiKey, browserGtiRevision } from "./integration-keys";
 
 const leaseParams = z.object({ relayId: z.string().uuid() });
 const executeParams = leaseParams.extend({ jobId: z.string().uuid(), operation: z.unknown() }).strict();
@@ -11,6 +12,9 @@ const defaults = {
   config: readRuntimeConfig,
   request: kibanaFetchJson,
   tabs: async (): Promise<Array<{ url?: string | undefined }>> => chrome.tabs.query({}),
+  reputationConfigured: hasBrowserGtiKey,
+  reputationRevision: browserGtiRevision,
+  reputation: lookupRelayReputation,
   clock: Date.now
 };
 
@@ -89,7 +93,8 @@ export class ServerBrowserRelay {
       if (this.lease && this.lease.expires > this.deps.clock() && this.lease.owner !== owner) throw new Error("Another console tab is using this extension relay.");
       const policy = relayPolicySchema.parse(params);
       const config = await this.deps.config();
-      const source: RelaySource = { kibanaBaseUrl: config.kibanaBaseUrl.replace(/\/$/, ""), spaceId: config.spaceId || "default", policy };
+      const source: RelaySource = { kibanaBaseUrl: config.kibanaBaseUrl.replace(/\/$/, ""), spaceId: config.spaceId || "default", policy,
+        reputationConfigured: await this.deps.reputationConfigured(), reputationRevision: await this.deps.reputationRevision() };
       await this.checkBrowser(source);
       const result = await this.read(source, relayFieldCapsPath(policy.indexPattern, [policy.timestampField]), "POST", undefined, 7000);
       validateTimestamp(result, source);
@@ -110,7 +115,7 @@ export class ServerBrowserRelay {
       const result = await this.read(lease.source, relayFieldCapsPath(lease.source.policy.indexPattern, [lease.source.policy.timestampField]), "POST");
       validateTimestamp(result, lease.source);
       lease.expires = this.deps.clock() + 90000;
-      return { ready: true };
+      return { ready: true, reputationConfigured: await this.deps.reputationConfigured(), reputationRevision: await this.deps.reputationRevision() };
     }
     const parsed = executeParams.parse(params);
     const operation = validateRelayOperation(parsed.operation, lease.source.policy);
@@ -119,7 +124,9 @@ export class ServerBrowserRelay {
     if (this.completed.size >= 4) this.completed.delete(this.completed.keys().next().value!);
     const response = (async () => {
       let result: unknown;
-      if (operation.kind === "openPit") {
+      if (operation.kind === "reputation") {
+        result = await this.deps.reputation(operation.target);
+      } else if (operation.kind === "openPit") {
         if (lease.pits.size >= 8) throw new Error("Too many open relay search snapshots.");
         result = await this.read(lease.source, `/${encodeURIComponent(operation.indexPattern)}/_pit?keep_alive=10m`, "POST");
         const id = snapshotId(result);

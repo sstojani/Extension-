@@ -90,7 +90,11 @@ export class Store {
   reputationMap() {
     return Object.fromEntries(this.db.prepare("SELECT key,body FROM reputations").all().map(row => [row.key, JSON.parse(row.body)]));
   }
-  reputationJobs(now, limit = 10) { return this.db.prepare("SELECT * FROM reputations WHERE next<=? ORDER BY next LIMIT ?").all(now, limit).map(row => ({ ...row, body: JSON.parse(row.body) })); }
+  reputationJobs(now, limit = 10, priorityKeys = []) {
+    const keys = [...new Set(priorityKeys)].slice(0, 500);
+    const priority = keys.length ? `CASE WHEN key IN (${keys.map(() => "?").join(",")}) THEN 0 ELSE 1 END,` : "";
+    return this.db.prepare(`SELECT * FROM reputations WHERE next<=? ORDER BY ${priority}next LIMIT ?`).all(now, ...keys, limit).map(row => ({ ...row, body: JSON.parse(row.body) }));
+  }
   reputationResult(job, result, next) { this.db.prepare("UPDATE reputations SET status=?,next=?,attempts=?,body=? WHERE key=?").run(result.status, next, result.status === "scored" ? 0 : job.attempts + 1, JSON.stringify(result), job.key); }
   queueDelivery(alert, channel, now = new Date().toISOString()) {
     const id = `${alert.id}|${channel.id}`;

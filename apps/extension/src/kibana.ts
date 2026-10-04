@@ -10,6 +10,9 @@ import {
   sanitizeFleetAgent,
   sanitizeFleetSummary,
   threatRadarAnalyzeParamsSchema,
+  relayReputationTargetSchema,
+  relayReputationResultSchema,
+  hasUsableGtiAssessment,
   type BridgeErrorCode,
   type DataViewSummary,
   type KibanaStatus,
@@ -83,6 +86,7 @@ export interface GtiEnrichmentState {
   gtiStatus?: GtiLookupStatus;
   gtiMessage?: string;
   gtiCached?: boolean;
+  gtiCheckedAt?: string;
 }
 
 type ThreatRadarRole = "source" | "destination";
@@ -2363,6 +2367,20 @@ export function resetGtiLookupState(): void {
   gtiRateLimitedUntil = 0;
 }
 
+export async function lookupRelayReputation(target: unknown) {
+  const parsed = relayReputationTargetSchema.parse(target);
+  const saved = await chrome.storage.local.get("googleThreatIntelApiKey");
+  const key = typeof saved.googleThreatIntelApiKey === "string" ? saved.googleThreatIntelApiKey.trim() : "";
+  const reports = await fetchGtiReputations([parsed], key);
+  const report = reports.get(gtiCacheKey(parsed.value, parsed.type));
+  const gti = report?.gti;
+  return relayReputationResultSchema.parse(gti ? {
+    status: "scored", verdict: classifyGtiReputation(gti) === "Clean" ? (/benign|harmless/i.test(gti.verdict ?? "") ? "benign" : /unknown/i.test(gti.verdict ?? "") ? "unknown" : "undetected") : classifyGtiReputation(gti).toLowerCase(),
+    score: gti.threatScore, malicious: gti.malicious, suspicious: gti.suspicious, vendors: gti.totalEngines ?? 0,
+    gtiVerdict: gti.verdict ?? null, cached: report?.gtiCached === true, checkedAt: report?.gtiCheckedAt
+  } : { status: report?.gtiStatus ?? "unavailable", verdict: "unknown" });
+}
+
 async function fetchGtiReputations(targets: GtiLookupTarget[], apiKey: string): Promise<Map<string, GtiLookupResult>> {
   const results = new Map<string, GtiLookupResult>();
   const uniqueTargets = [...new Map(targets.flatMap((target) => {
@@ -2392,8 +2410,8 @@ async function fetchGtiReputations(targets: GtiLookupTarget[], apiKey: string): 
     const key = gtiCacheKey(target.value, target.type);
     const cached = cache[key];
     if (cached && isFreshGtiCacheEntry(cached)) {
-      const { checkedAt: _checkedAt, ...cachedResult } = cached;
-      results.set(key, { ...cachedResult, gtiCached: true });
+      const { checkedAt, ...cachedResult } = cached;
+      results.set(key, { ...cachedResult, gtiCached: true, gtiCheckedAt: checkedAt });
       continue;
     }
     if (Date.now() < gtiRateLimitedUntil) {
@@ -2405,12 +2423,13 @@ async function fetchGtiReputations(targets: GtiLookupTarget[], apiKey: string): 
     }
 
     const lookup = await fetchGtiReputation(target.value, target.type, apiKey);
-    results.set(key, lookup);
+    const checkedAt = new Date().toISOString();
+    results.set(key, { ...lookup, gtiCheckedAt: checkedAt });
     if (lookup.gtiStatus === "rate_limited") {
       gtiRateLimitedUntil = Math.max(gtiRateLimitedUntil, Date.now() + GTI_FAILURE_TTL_MS);
       continue;
     }
-    cache[key] = { ...lookup, checkedAt: new Date().toISOString() };
+    cache[key] = { ...lookup, checkedAt };
     cacheChanged = true;
   }
 
@@ -2434,8 +2453,13 @@ async function fetchGtiReputation(value: string, type: "ip" | "domain" | "hash",
     try {
       const response = await fetchGtiUrl(url, apiKey);
       if (response.ok) {
+        const raw = await response.json();
+        const attributes = asRecord(asRecord(asRecord(raw).data).attributes);
+        if (!hasUsableGtiAssessment(attributes)) {
+          return { gtiStatus: "unavailable", gtiMessage: "GTI/VT returned no usable assessment." };
+        }
         return {
-          gti: parseGtiReputationResponse(await response.json()),
+          gti: parseGtiReputationResponse(raw),
           gtiStatus: "scored",
           gtiMessage: "Reputation retrieved from GTI/VT."
         };

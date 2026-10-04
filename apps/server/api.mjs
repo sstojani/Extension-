@@ -59,9 +59,16 @@ export function createAgentApi(worker, runtime, version = "0.15.0") {
       }
       const session = authenticated(request);
       if (!session) return json(401, { error: "Server agent login required." });
-      if (request.method !== "GET" && ["config", "notifications", "rules", "clear"].some(r => route === r || route.startsWith(`${r}/`)) && session.role !== "admin") return json(403, { error: "An administrator token is required to change policy, rules or delivery settings." });
+      if (request.method !== "GET" && ["config", "notifications", "rules", "clear", "integrations"].some(r => route === r || route.startsWith(`${r}/`)) && session.role !== "admin") return json(403, { error: "An administrator token is required to change policy, rules or delivery settings." });
       if (route === "logout" && request.method === "POST") { worker.elastic?.relay?.disconnect(cookie(request)); sessions.delete(cookie(request)); return json(200, { authenticated: false }, { "Set-Cookie": "soc_watch_session=; HttpOnly; SameSite=Strict; Path=/api/agent; Max-Age=0" }); }
       if (route === "state" && request.method === "GET") return json(200, { ...worker.state(), session: { role: session.role, user: session.user } });
+      if (route === "integrations" && request.method === "PUT") {
+        if (!runtime.integrations) return json(503, { error: "Persistent server integrations are unavailable on this deployment." });
+        const result = runtime.integrations.save(await readBody(request, 16384));
+        if (result.gtiChanged) { store.set("reputationBackoff", null); store.db.prepare("UPDATE reputations SET next=?,attempts=0 WHERE status IN ('pending','unauthorized','unavailable','rate_limited')").run(new Date().toISOString()); }
+        store.audit("integrations.saved", result.integrations);
+        void worker.tick(); return json(200, { saved: true, integrations: result.integrations });
+      }
       if (route.startsWith("relay/") && request.method === "POST") {
         const relay = worker.elastic?.relay;
         if (!relay) return json(409, { error: "This deployment is not in browser-relay mode." });
@@ -82,7 +89,15 @@ export function createAgentApi(worker, runtime, version = "0.15.0") {
           for (const campaign of store.list("campaign", 5)) if (campaign.cursor) store.record("campaign", { ...campaign, cursor: null });
           void worker.tick(); return json(200, result);
         }
-        if (route === "relay/poll") return json(200, relay.poll(cookie(request), body.clientId));
+        if (route === "relay/poll") {
+          const result = relay.poll(cookie(request), body.clientId, body.reputationConfigured, body.reputationRevision);
+          const revision = relay.lease?.source.reputationRevision;
+          if (revision && revision !== store.get("browserReputationRevision")) {
+            store.set("browserReputationRevision", revision);
+            if (!runtime.gtiKey) { store.set("reputationBackoff", null); store.db.prepare("UPDATE reputations SET next=?,attempts=0 WHERE status IN ('pending','unauthorized','unavailable','rate_limited','not_configured')").run(new Date().toISOString()); }
+          }
+          return json(200, result);
+        }
         if (route === "relay/result") return json(200, relay.result(cookie(request), body.clientId, body));
         if (route === "relay/disconnect") { relay.disconnect(cookie(request), body.clientId); return json(200, { disconnected: true }); }
       }

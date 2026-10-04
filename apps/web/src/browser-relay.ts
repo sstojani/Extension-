@@ -37,21 +37,29 @@ export async function runBrowserRelay({ api, bridge, policy, signal, onProgress,
       if (typeof connection?.relayId !== "string") throw new Error("Invalid extension relay response. Install the matching Bridge package.");
       relayId = connection.relayId;
       const source = relaySourceSchema.parse(connection.source);
+      let reputationConfigured = source.reputationConfigured === true;
+      let reputationRevision = source.reputationRevision;
       await post("/relay/connect", { clientId, source });
       let lastProof = Date.now();
       onProgress({ state: "connected", message: `${source.kibanaBaseUrl} / ${source.spaceId}` });
       while (!signal.aborted) {
         if (Date.now() - lastProof >= 20000) {
-          await call("agent.relay.heartbeat", { relayId }); lastProof = Date.now();
+          const proof = await call("agent.relay.heartbeat", { relayId }) as { reputationConfigured?: boolean; reputationRevision?: string };
+          reputationRevision = proof.reputationRevision;
+          reputationConfigured = proof.reputationConfigured === true; lastProof = Date.now();
         }
-        const { job } = await post<{ job: null | { id: string; operation: unknown } }>("/relay/poll", { clientId });
+        const { job } = await post<{ job: null | { id: string; operation: unknown } }>("/relay/poll", { clientId, reputationConfigured, reputationRevision });
         if (!job) { await sleep(pollMs, signal); continue; }
         const operation = relayOperationSchema.parse(job.operation);
         const result = await bridge("agent.relay.execute", { relayId, jobId: job.id, operation });
         if (signal.aborted) break;
         await post("/relay/result", { clientId, id: job.id, success: result.success,
           ...(result.success ? { data: result.data } : { error: result.error.message, errorCode: result.error.code }) });
-        if (!result.success && !(operation.kind === "live" && result.error.code === "INVALID_REQUEST")) throw new RelayBridgeError(result.error.message, result.error.code);
+        if (!result.success) {
+          const providerFailure = operation.kind === "reputation" && result.error.code === "INTERNAL_ERROR";
+          const stageFailure = operation.kind === "live" && result.error.code === "INVALID_REQUEST";
+          if (!providerFailure && !stageFailure) throw new RelayBridgeError(result.error.message, result.error.code);
+        }
       }
     } catch (error) {
       retrying = !(error instanceof RelayBridgeError && ["INVALID_REQUEST", "INVALID_ORIGIN", "KIBANA_FORBIDDEN", "KIBANA_NOT_FOUND", "RESULT_TOO_LARGE"].includes(error.code));

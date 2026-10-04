@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   agentRequest, AgentApiError, channelDraft, configPatch, createAlertCursor,
-  notificationPayload, orderedFindings, scanHealth, validateConfig, validateRule, dataViewScope,
+  notificationPayload, orderedFindings, scanHealth, validateConfig, validateRule, dataViewScope, reputationSourceLabel,
   type AgentConfig, type AgentState, type Finding, type WatchRule
 } from "./ServerAgent";
 
@@ -25,6 +25,18 @@ function state(): AgentState {
     reputation: { pending: 0, unavailable: 0, scored: 0 }, campaigns: []
   };
 }
+
+it("distinguishes an offline browser reputation source from a confirmed missing key", () => {
+  const snapshot = state(); snapshot.reputation.configured = false; snapshot.reputation.source = "missing";
+  snapshot.status.dataSource = { mode: "browser_relay", ready: false };
+  expect(reputationSourceLabel(snapshot)).toBe("relay offline");
+  snapshot.status.dataSource.ready = true;
+  expect(reputationSourceLabel(snapshot)).toBe("not configured");
+  snapshot.reputation.source = "browser";
+  expect(reputationSourceLabel(snapshot)).toBe("browser");
+  snapshot.reputation.source = "server"; snapshot.status.dataSource.ready = false;
+  expect(reputationSourceLabel(snapshot)).toBe("server");
+});
 
 it("never reports healthy or running collection for a disconnected browser relay", () => {
   const snapshot = state();

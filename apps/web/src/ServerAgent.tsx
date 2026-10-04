@@ -12,7 +12,7 @@ import { relayPolicySchema, type DataViewSummary } from "@soc-watch/protocol";
 type IndicatorType = "ip" | "domain" | "hash" | "identity";
 type FindingStatus = "open" | "acknowledged" | "resolved" | "false_positive";
 type ScanMode = "live" | "today" | "baseline";
-type Tab = "Findings" | "Watch Rules" | "Agent Settings" | "Delivery";
+type Tab = "Findings" | "Watch Rules" | "Agent Settings" | "Integrations" | "Delivery";
 type Tone = "good" | "warning" | "error" | "neutral";
 type JsonObject = Record<string, unknown>;
 export type AgentException = {
@@ -46,6 +46,7 @@ export type Finding = {
   indicatorType: IndicatorType; severity: string; priority: number; behaviorScore: number;
   confidence: number; reputation: {
     verdict: string; score?: number; malicious?: number; suspicious?: number; checkedAt?: string; status?: string;
+    source?: string; gtiVerdict?: string | null; assessment?: string;
   } | null; firstSeen: string; lastSeen: string; count: number; evidence: Evidence[];
   reasons: string[]; limitations: string[]; status: FindingStatus; assignedTo?: string; notes?: unknown; activity?: ActivityContext;
 };
@@ -83,7 +84,8 @@ export type AgentState = {
   config: AgentConfig; rules: WatchRule[]; findings: Finding[]; runs: Run[]; alerts: Alert[];
   deliveries: { id: string; channel: string; status: string; attempts: number; nextAttempt: string | null; error?: string }[];
   notifications: { channels: Channel[]; minPriority: number; cooldownMinutes: number };
-  reputation: { pending: number; unavailable: number; scored: number; configured?: boolean; notFound?: number }; campaigns: Campaign[];
+  reputation: { pending: number; unavailable: number; scored: number; configured?: boolean; notFound?: number; source?: string }; campaigns: Campaign[];
+  integrations?: Record<"gti" | "threatfox" | "malwarebazaar", { configured: boolean; source: "environment" | "server" | "missing" }>;
   investigations?: Investigation[];
 };
 type PublicStatus = {
@@ -93,6 +95,12 @@ type PublicStatus = {
 type RequestOptions = { method?: string; body?: unknown; signal?: AbortSignal; maxBytes?: number };
 type Api = <T = unknown>(path: string, options?: RequestOptions) => Promise<T>;
 type Action = (key: string, path: string, body?: unknown, method?: string) => Promise<boolean>;
+
+export function reputationSourceLabel(state: AgentState) {
+  if (state.reputation.source === "server" || state.reputation.source === "browser") return state.reputation.source;
+  if (state.status.dataSource?.mode === "browser_relay" && !state.status.dataSource.ready) return "relay offline";
+  return state.reputation.configured === false ? "not configured" : "server";
+}
 
 export class AgentApiError extends Error {
   constructor(message: string, public status: number) { super(message); this.name = "AgentApiError"; }
@@ -501,7 +509,7 @@ export function ServerAgent() {
   const openCount = state?.findings.filter(finding => finding.status === "open" || finding.status === "acknowledged").length ?? 0;
   const tabs: { name: Tab; icon: typeof FileSearch }[] = [
     { name: "Findings", icon: FileSearch }, { name: "Watch Rules", icon: ShieldCheck },
-    { name: "Agent Settings", icon: Settings }, { name: "Delivery", icon: Send }
+    { name: "Agent Settings", icon: Settings }, { name: "Integrations", icon: ShieldCheck }, { name: "Delivery", icon: Send }
   ];
 
   return <div className="server-agent">
@@ -532,7 +540,7 @@ export function ServerAgent() {
             <div><span>Last live success</span><strong>{date(state.status.live?.lastSuccess ?? state.status.lastSuccess)}</strong></div>
             <div><span>Next live check</span><strong>{state.config.enabled ? date(state.status.live?.nextScan ?? state.status.nextScan) : "Paused"}</strong></div>
             <div><span>Retained open findings</span><strong className="sa-number">{count(openCount)}</strong></div>
-            <div><span>Reputation{state.reputation.configured === false ? " (not configured)" : ""}</span><strong>{count(state.reputation.pending)} pending / {count(state.reputation.unavailable)} unavailable</strong></div>
+            <div><span>GTI / VirusTotal ({reputationSourceLabel(state)})</span><strong>{count(state.reputation.pending)} pending / {count(state.reputation.unavailable)} unavailable</strong></div>
           </section>
           {health.tone !== "good" && <p className={`sa-feedback sa-${health.tone}`}><Activity size={16} aria-hidden="true" />{health.detail}</p>}
           <section className="sa-section" aria-label="Live monitoring">
@@ -551,6 +559,7 @@ export function ServerAgent() {
             {tab === "Findings" && <Findings state={state} health={health} onInspect={setSelectedId} onClear={() => setClearOpen(true)} disabled={!!busy || !canAdmin} />}
             {tab === "Watch Rules" && <Rules rules={state.rules} channels={state.notifications.channels} action={action} busy={busy} mutationError={error} canAdmin={canAdmin} />}
             {tab === "Agent Settings" && <AgentSettings config={state.config} status={state.status} api={api} action={action} busy={busy} canAdmin={canAdmin} />}
+            {tab === "Integrations" && <IntegrationSettings state={state} action={action} busy={busy} canAdmin={canAdmin} />}
             {tab === "Delivery" && <Delivery state={state} action={action} busy={busy} canAdmin={canAdmin} browserEnabled={browserEnabled} permission={permission} browserError={browserError} onEnable={() => void enableBrowser()} onDisable={() => { browserActive.current = false; setBrowserEnabled(false); }} />}
           </div>
           <footer className="sa-footer"><span>Updated {date(updatedAt)}</span><span>{count(state.reputation.scored)} reputation scored / {count(state.reputation.notFound)} not found / {count(state.campaigns?.length)} campaigns</span></footer>
@@ -683,7 +692,7 @@ function FindingInspector({ finding, investigation, api, action, busy, mutationE
     <dl className="sa-facts"><div><dt>Priority</dt><dd>{finding.priority}</dd></div><div><dt>Behavior score</dt><dd>{finding.behaviorScore}</dd></div><div><dt>Confidence</dt><dd>{finding.confidence}</dd></div><div><dt>Retained proof events</dt><dd>{count(finding.count)}</dd></div><div><dt>First seen</dt><dd>{date(finding.firstSeen)}</dd></div><div><dt>Last seen</dt><dd>{date(finding.lastSeen)}</dd></div><div><dt>Category</dt><dd>{finding.category}</dd></div><div><dt>Fingerprint</dt><dd><code>{finding.fingerprint}</code></dd></div></dl>
     <section className="sa-section"><h3>Behavioral reasons</h3>{finding.reasons.length ? <ul className="sa-list">{finding.reasons.map((reason, i) => <li key={i}>{reason}</li>)}</ul> : <p className="sa-muted">No behavioral reasons reported.</p>}</section>
     {finding.activity && <section className="sa-section"><h3>Observed activity</h3><dl className="sa-facts"><div><dt>Blocked events (lower bound)</dt><dd>{count(finding.activity.blockedAttemptsLowerBound)}</dd></div><div><dt>Infrastructure in proof</dt><dd>{finding.activity.infrastructures.join(", ") || "Not recorded"}</dd></div><div><dt>Source GeoIP in proof</dt><dd>{finding.activity.countries.join(", ") || "Not recorded"}</dd></div><div><dt>Targets</dt><dd>{finding.activity.targets.join(", ") || "Not recorded"}</dd></div><div><dt>Ports</dt><dd>{finding.activity.ports.join(", ") || "Not recorded"}</dd></div><div><dt>Ports 49152-65535</dt><dd>{finding.activity.ports.filter(port => port >= 49152).join(", ") || "None in returned evidence"}</dd></div></dl>{finding.activity.allowed.length > 0 && <><h4>Accepted/allowed activity in the same window</h4><ul className="sa-list">{finding.activity.allowed.map((event, index) => <li key={index}>{date(event.timestamp)} | {event.action || "success"} | {event.destinationIp || "Unknown target"}:{event.port || "Unknown port"} | {event.infrastructure || "Unknown infrastructure"}</li>)}</ul></>}</section>}
-    <section className="sa-section"><h3>Reputation</h3>{reputation ? <><div className="sa-actions"><Badge tone={statusTone(reputation.status)}>{human(reputation.status)}</Badge><span>{reputation.verdict || "No verdict reported"}</span></div><dl className="sa-facts"><div><dt>Score</dt><dd>{count(reputation.score)}</dd></div><div><dt>Malicious</dt><dd>{count(reputation.malicious)}</dd></div><div><dt>Suspicious</dt><dd>{count(reputation.suspicious)}</dd></div><div><dt>Checked</dt><dd>{date(reputation.checkedAt)}</dd></div></dl></> : <p className="sa-muted">Reputation unavailable for this finding.</p>}</section>
+    <section className="sa-section"><h3>Reputation</h3>{reputation ? <><div className="sa-actions"><Badge tone={statusTone(reputation.status)}>{human(reputation.status)}</Badge><span>{reputation.verdict || "No verdict reported"}</span></div><dl className="sa-facts"><div><dt>Provider</dt><dd>{reputation.source ?? "Not reported"}</dd></div><div><dt>GTI verdict</dt><dd>{reputation.gtiVerdict ?? "Not supplied by provider"}</dd></div><div><dt>Score</dt><dd>{count(reputation.score)}</dd></div><div><dt>Malicious</dt><dd>{count(reputation.malicious)}</dd></div><div><dt>Suspicious</dt><dd>{count(reputation.suspicious)}</dd></div><div><dt>Checked</dt><dd>{date(reputation.checkedAt)}</dd></div></dl></> : <p className="sa-muted">Reputation unavailable for this finding.</p>}</section>
     <section className="sa-section"><h3>Limitations</h3>{finding.limitations.length ? <ul className="sa-list sa-warning">{finding.limitations.map((limitation, i) => <li key={i}>{limitation}</li>)}</ul> : <p className="sa-muted">No limitations reported.</p>}</section>
     <section className="sa-section"><div className="sa-section-heading"><h3>Investigator</h3><div className="sa-actions">{investigation && <Badge tone={statusTone(investigation.status)}>{human(investigation.status)}</Badge>}<button type="button" className="sa-button" disabled={!!busy || investigation?.status === "pending"} onClick={() => void action("investigate", "/investigate", { findingId: finding.id }).then(ok => { if (ok) setInvestigationQueued(true); })}><FileSearch size={16} aria-hidden="true" />{busy === "investigate" ? "Queueing..." : investigation ? "Investigate again" : "Investigate"}</button></div></div>
       {investigationQueued && !investigation && <p role="status" className="sa-muted">Investigation queued. Awaiting server status.</p>}
@@ -868,6 +877,38 @@ function AgentSettings({ config, status, api, action, busy, canAdmin }: {
     <section className="sa-section"><h2>Scan checkpoint and coverage</h2><dl className="sa-facts"><div><dt>Checkpoint</dt><dd>{message(status.checkpoint)}</dd></div><div><dt>Coverage</dt><dd>{message(status.coverage)}</dd></div><div><dt>Last error</dt><dd className={status.lastError ? "sa-error" : ""}>{status.lastError ? message(status.lastError) : "None reported"}</dd></div></dl></section>
     <section className="sa-section"><div className="sa-section-heading"><h2>Evaluation</h2><button type="button" className="sa-button" disabled={evaluationLoading} onClick={() => setEvaluationRequest(value => value + 1)}><FileSearch size={16} aria-hidden="true" />{evaluationLoading ? "Loading..." : "Load evaluation"}</button></div><Feedback error={evaluationError} />{evaluation && <pre className="sa-json" tabIndex={0}>{evaluation}</pre>}</section>
   </>;
+}
+
+function IntegrationSettings({ state, action, busy, canAdmin }: { state: AgentState; action: Action; busy: string; canAdmin: boolean }) {
+  const [draft, setDraft] = useState({ gti: "", threatfox: "", malwarebazaar: "" });
+  const [remove, setRemove] = useState<string[]>([]);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+  const fields = [["gti", "Google Threat Intelligence / VirusTotal API key"], ["threatfox", "ThreatFox Auth-Key"], ["malwarebazaar", "MalwareBazaar Auth-Key"]] as const;
+  return <form className="sa-section" onSubmit={event => {
+    event.preventDefault(); setError(""); setSuccess("");
+    void action("integrations", "/integrations", { ...draft, remove }, "PUT").then(ok => {
+      if (ok) { setDraft({ gti: "", threatfox: "", malwarebazaar: "" }); setRemove([]); setSuccess("Server integration keys saved. Blank fields left existing keys unchanged."); }
+      else setError("Keys were not saved. Review the server error above.");
+    });
+  }}><fieldset className="sa-form-body" disabled={!canAdmin || !!busy || !state.integrations}>
+    <h2>Server integrations</h2>
+    <dl className="sa-facts"><div><dt>Storage</dt><dd>Protected server data directory</dd></div><div><dt>Active reputation source</dt><dd>{human(reputationSourceLabel(state))}</dd></div></dl>
+    <div className="sa-form-grid">{fields.map(([id, label]) => {
+      const saved = state.integrations?.[id];
+      return <div key={id}><Field label={label}><input type="password" autoComplete="off" maxLength={4096} value={draft[id]}
+        placeholder={saved?.configured ? "Saved; leave blank to keep" : "Not configured"} disabled={saved?.source === "environment" || remove.includes(id)}
+        onChange={event => { setDraft(previous => ({ ...previous, [id]: event.target.value })); setSuccess(""); }} /></Field>
+        <p className="sa-muted">{saved?.configured ? `Saved in ${saved.source === "environment" ? "service environment" : "server storage"}` : "No server key saved"}</p>
+        {saved?.source === "server" && <Toggle label={`Remove saved ${id} key`} checked={remove.includes(id)} onChange={checked => {
+          setRemove(previous => checked ? [...previous, id] : previous.filter(value => value !== id)); setDraft(previous => ({ ...previous, [id]: "" })); setSuccess("");
+        }} />}
+      </div>;
+    })}</div>
+    <Feedback error={error} success={success} /><button className="sa-button sa-primary" disabled={!remove.length && !Object.values(draft).some(value => value.trim())}>
+      <Save size={16} aria-hidden="true" />{busy === "integrations" ? "Saving..." : "Save server keys"}
+    </button>
+  </fieldset></form>;
 }
 
 function Delivery({ state, action, busy, canAdmin, browserEnabled, permission, browserError, onEnable, onDisable }: {
