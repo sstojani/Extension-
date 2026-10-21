@@ -20,5 +20,8 @@ async function copy(dir,target) {
   }
 }
 await copy(source,destination);
+try { await copyFile('/app/.env',join(destination,'runtime.env')); }
+catch(error) { if(error.code!=='ENOENT') throw error; }
 await writeFile(join(destination,'BACKUP-COMPLETE.json'),JSON.stringify({created:new Date().toISOString(),source}));
 console.log('Pre-start state backup completed:',destination);
+// GitOps update verification: 2026-10-21.
