@@ -1,7 +1,7 @@
 FROM node:24-bookworm-slim AS build
 WORKDIR /app
 COPY . .
-RUN npm ci && npm test && npm run typecheck && npm run build && npm run build -w apps/web -- --base=/soc-watch/ && cp apps/extension/src/icon-128.svg apps/web/dist/bridge-icon.svg
+RUN npm ci && npm run build && npm test && npm run typecheck && npm run build -w apps/web -- --base=/soc-watch/ && cp apps/extension/src/icon-128.svg apps/web/dist/bridge-icon.svg
 FROM node:24-bookworm-slim
 WORKDIR /app
 COPY --from=build --chown=node:node /app /app
