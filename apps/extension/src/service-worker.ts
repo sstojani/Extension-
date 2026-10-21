@@ -31,7 +31,7 @@ import {
   type ThreatRadarIdentityAnomaly
 } from "./kibana";
 import type { ThreatIntelIOC } from "./threat-intel";
-import { runHuntCampaignBatch } from "./hunt-campaign";
+import { HuntCampaignError, runHuntCampaignBatch } from "./hunt-campaign";
 import { isExcludedCandidate, type CandidateException } from "./candidate-exclusions";
 import { mergeFindingHistory } from "./threat-radar-history";
 import { classifyIdentityValue } from "./identity-analysis";
@@ -260,6 +260,9 @@ async function handleExternalMessage(message: unknown, sender: chrome.runtime.Me
     await setConnectedBadge(request.action);
     return ok(requestId, data, elapsed(started));
   } catch (error) {
+    if (error instanceof HuntCampaignError) {
+      return fail(requestId, "INVALID_REQUEST", error.message, elapsed(started), { huntRecovery: error.recovery, nextBatchOffset: error.nextBatchOffset });
+    }
     if (error instanceof BridgeOperationError) {
       if (isKibanaConnectionError(error.code)) await setDisconnectedIcon();
       return fail(requestId, error.code, error.message, elapsed(started), error.details);
@@ -363,6 +366,9 @@ async function handleInternalMessage(message: unknown): Promise<BridgeResponse> 
     await setConnectedBadge(request.action);
     return ok(requestId, data, elapsed(started));
   } catch (error) {
+    if (error instanceof HuntCampaignError) {
+      return fail(requestId, "INVALID_REQUEST", error.message, elapsed(started), { huntRecovery: error.recovery, nextBatchOffset: error.nextBatchOffset });
+    }
     if (error instanceof BridgeOperationError) {
       if (isKibanaConnectionError(error.code)) await setDisconnectedIcon();
       return fail(requestId, error.code, error.message, elapsed(started), error.details);
@@ -1934,7 +1940,7 @@ async function runDailyIocHunt(params: unknown): Promise<unknown> {
         return {
           ioc,
           total,
-          hits: summarizeBulkHits(bucket),
+          hits: summarizeBulkHits(bucket, parsed.timestampField),
           matched: total > 0
         };
       });
@@ -1977,6 +1983,8 @@ async function runDailyIocHunt(params: unknown): Promise<unknown> {
     expiresAt: collection.expiresAt,
     stats: collection.stats,
     progress: collection.progress,
+    indicatorGroup: collection.indicatorGroup,
+    coverage: collection.coverage,
     retryBatchOffset: collection.retryBatchOffset,
     ...(collection.error !== undefined ? { error: collection.error } : {}),
     ...(alertError !== undefined ? { alertError } : {}),
@@ -2038,7 +2046,7 @@ function countResultsByType(results: Array<{ ioc: ThreatIntelIOC }>): Record<str
   return counts;
 }
 
-function summarizeBulkHits(bucket: Record<string, unknown>): Array<{ index: string; timestamp: string | undefined; host: string | undefined; eventAction: string | undefined; destinationPort: number | undefined; sourceIp: string | undefined; destinationIp: string | undefined; message: string | undefined }> {
+function summarizeBulkHits(bucket: Record<string, unknown>, timestampField = "@timestamp"): Array<{ index: string; timestamp: string | undefined; host: string | undefined; eventAction: string | undefined; destinationPort: number | undefined; sourceIp: string | undefined; destinationIp: string | undefined; message: string | undefined }> {
   const latest = asRecord(bucket.latest);
   const hitsObject = asRecord(latest.hits);
   const rawHits = Array.isArray(hitsObject.hits) ? hitsObject.hits : [];
@@ -2051,7 +2059,7 @@ function summarizeBulkHits(bucket: Record<string, unknown>): Array<{ index: stri
     const sourceInfo = asRecord(source.source);
     return {
       index: typeof hitRecord._index === "string" ? hitRecord._index : "--",
-      timestamp: typeof source["@timestamp"] === "string" ? source["@timestamp"] : undefined,
+      timestamp: readHuntTimestamp(source, timestampField),
       host: typeof host.name === "string" ? host.name : undefined,
       eventAction: typeof event.action === "string" ? event.action : undefined,
       destinationPort: typeof destination.port === "number" ? destination.port : undefined,
@@ -2060,6 +2068,11 @@ function summarizeBulkHits(bucket: Record<string, unknown>): Array<{ index: stri
       message: typeof source.message === "string" ? source.message.slice(0, 220) : undefined
     };
   });
+}
+
+function readHuntTimestamp(source: Record<string, unknown>, field: string): string | undefined {
+  const value = source[field] ?? field.split(".").reduce<unknown>((current, key) => asRecord(current)[key], source);
+  return typeof value === "string" ? value : undefined;
 }
 
 function readNumber(value: unknown): number {

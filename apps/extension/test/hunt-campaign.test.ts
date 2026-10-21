@@ -105,6 +105,102 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("type-specific IOC hunt queues", () => {
+  function mixedFeed() {
+    feed = prioritizeThreatIntel([
+      ...Array.from({ length: 1001 }, (_, index) => ({ value: `203.0.${Math.floor(index / 256)}.${index % 256}`, source: "IP feed" })),
+      ...Array.from({ length: 601 }, (_, index) => ({ value: `domain-${index}.example.test`, source: "Domain feed" })),
+      ...[32, 40, 64].flatMap((length) => Array.from({ length: 201 }, (_, index) => ({ value: (index + 1).toString(16).padStart(length, "0"), source: "Hash feed" }))),
+      { value: "https://url.example.test/payload", source: "URL feed" }
+    ], NOW);
+  }
+
+  it("keeps IP, domain, all hash algorithms and URL queues independent and bounded at 500", async () => {
+    mixedFeed();
+    expect(feed.slice(0, 500).every((ioc) => ["md5", "sha1", "sha256"].includes(ioc.type))).toBe(true);
+    const ip = await run(0, { indicatorGroup: "ip", maxIocs: 5000 });
+    const domain = await run(0, { indicatorGroup: "domain", maxIocs: 5000, resumeCampaign: true, campaignId: ip.campaignId });
+    const hash = await run(0, { indicatorGroup: "hash", maxIocs: 5000, resumeCampaign: true });
+    expect(ip.iocs).toHaveLength(500);
+    expect(ip.iocs.every((ioc) => ioc.type === "ip")).toBe(true);
+    expect(ip.totalAvailable).toBe(1001);
+    expect(domain.iocs).toHaveLength(500);
+    expect(domain.iocs.every((ioc) => ioc.type === "domain")).toBe(true);
+    expect(domain.totalAvailable).toBe(601);
+    expect(hash.iocs).toHaveLength(500);
+    expect(new Set(hash.iocs.map((ioc) => ioc.type))).toEqual(new Set(["md5", "sha1", "sha256"]));
+    expect(hash.totalAvailable).toBe(603);
+    const nextIp = await run(500, { indicatorGroup: "ip", maxIocs: 500, resumeCampaign: true });
+    expect(new Set([...ip.results, ...nextIp.results]).size).toBe(1000);
+    expect(nextIp.coverage).toMatchObject({ ip: { checked: 1000, nextBatchOffset: 1000 }, domain: { checked: 500 }, hash: { checked: 500 }, url: { checked: 0 } });
+    const url = await run(0, { indicatorGroup: "url", resumeCampaign: true });
+    expect(url).toMatchObject({ totalAvailable: 1, batchSize: 1, hasMore: false, indicatorGroup: "url" });
+    expect(url.iocs[0]?.type).toBe("url");
+    expect(collect).toHaveBeenCalledTimes(1);
+    expect(new Set([ip.campaignId, domain.campaignId, hash.campaignId, nextIp.campaignId, url.campaignId]).size).toBe(1);
+  });
+
+  it("retries a failed domain batch without advancing it or the IP queue", async () => {
+    mixedFeed();
+    const ip = await run(0, { indicatorGroup: "ip", maxIocs: 500 });
+    query.mockRejectedValueOnce(new Error("Domain query timed out"));
+    const failed = await run(0, { indicatorGroup: "domain", maxIocs: 500, resumeCampaign: true });
+    expect(failed).toMatchObject({ nextBatchOffset: 0, retryBatchOffset: 0, coverage: { ip: { nextBatchOffset: 500 }, domain: { checked: 0 } } });
+    const retry = await run(0, { indicatorGroup: "domain", maxIocs: 1, resumeCampaign: true });
+    expect(retry.iocs).toEqual(failed.iocs);
+    expect(retry.batchSize).toBe(500);
+    expect(retry.campaignId).toBe(ip.campaignId);
+    expect(collect).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves a type queue after all its indicators have been checked", async () => {
+    const first = await run(0, { indicatorGroup: "domain", maxIocs: 500 });
+    const exhausted = await run(first.nextBatchOffset, { indicatorGroup: "domain", resumeCampaign: true });
+    expect(exhausted).toMatchObject({ batchSize: 0, totalAvailable: 8, nextBatchOffset: 8, hasMore: false });
+    expect(collect).toHaveBeenCalledTimes(1);
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports changed exclusions without shifting a type queue or counting skipped indicators as checked", async () => {
+    const original = structuredClone(feed);
+    await run(0, { indicatorGroup: "domain" });
+    const second = await run(3, { indicatorGroup: "domain", resumeCampaign: true }, (ioc) => ioc.normalized !== original[4]!.normalized);
+    expect(second.results).toEqual([original[3]!.normalized, original[5]!.normalized]);
+    expect(second).toMatchObject({ nextBatchOffset: 6, coverage: { domain: { checked: 5, excluded: 1, nextBatchOffset: 6 }, ip: { checked: 0 } } });
+    expect(storedCampaign().iocs).toEqual(original);
+    expect(collect).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports an empty type queue without a query or a new snapshot", async () => {
+    const first = await run(0, { indicatorGroup: "ip" });
+    expect(first).toMatchObject({ batchSize: 0, totalAvailable: 0, hasMore: false, coverage: { domain: { totalAvailable: 8, checked: 0 } } });
+    expect(query).not.toHaveBeenCalled();
+    const domain = await run(0, { indicatorGroup: "domain", resumeCampaign: true });
+    expect(domain.batchSize).toBe(3);
+    expect(collect).toHaveBeenCalledTimes(1);
+  });
+
+  it("Fresh Scan resets every queue and rejects another tab's replaced campaign ID", async () => {
+    const first = await run(0, { indicatorGroup: "domain" });
+    await run(0, { indicatorGroup: "hash", resumeCampaign: true });
+    const fresh = await run(0, { indicatorGroup: "ip" });
+    expect(fresh.coverage.domain.checked).toBe(0);
+    await expect(run(0, { indicatorGroup: "hash", resumeCampaign: true, campaignId: first.campaignId })).rejects.toMatchObject({ recovery: "fresh_scan" });
+    expect(collect).toHaveBeenCalledTimes(2);
+  });
+
+  it("resumes a legacy mixed snapshot without losing its progress", async () => {
+    const first = await run();
+    const campaign = storedCampaign();
+    Reflect.deleteProperty(campaign, "typedProgress");
+    storage[HUNT_CAMPAIGN_KEY] = campaign;
+    const domain = await run(0, { indicatorGroup: "domain", resumeCampaign: true });
+    expect(domain.campaignId).toBe(first.campaignId);
+    expect(storedCampaign().progress.checked).toBe(3);
+    expect(storedCampaign().typedProgress.domain.checked).toBe(3);
+  });
+});
+
 describe("immutable IOC hunt campaigns", () => {
   it("persists the fresh normalized, ranked snapshot before the first SIEM query", async () => {
     query.mockImplementationOnce(async (iocs) => {
@@ -217,6 +313,18 @@ describe("immutable IOC hunt campaigns", () => {
     expect(failed).toMatchObject({ nextBatchOffset: 0, retryBatchOffset: 0, progress: { checked: 0 } });
     expect(storedCampaign().iocs).toEqual(feed);
     expect(storedCampaign().progress.retry?.batchOffset).toBe(0);
+  });
+
+  it("can retry a failed first batch without refetching or replacing its snapshot", async () => {
+    query.mockRejectedValueOnce(new Error("SIEM unavailable"));
+    const failed = await run();
+    const original = structuredClone(feed);
+    feed = makeFeed(1);
+    const retry = await run(0, { resumeCampaign: true });
+    expect(retry.campaignId).toBe(failed.campaignId);
+    expect(retry.results).toEqual(original.slice(0, 3).map((ioc) => ioc.normalized));
+    expect(retry.nextBatchOffset).toBe(3);
+    expect(collect).toHaveBeenCalledTimes(1);
   });
 
   it("treats an incomplete SIEM batch as a retryable failure", async () => {
@@ -513,7 +621,7 @@ describe("IOC hunt bridge responses", () => {
     notificationsFailed: number;
     alertError?: string;
   };
-  let sendHunt: (batchOffset?: number, maxIocs?: number) => Promise<HuntUiResult>;
+  let sendHunt: (batchOffset?: number, maxIocs?: number, changes?: Partial<HuntCampaignParams>) => Promise<HuntUiResult>;
   let search: ReturnType<typeof vi.mocked<typeof import("../src/kibana").searchIOCBatch>>;
 
   beforeEach(async () => {
@@ -544,13 +652,13 @@ describe("IOC hunt bridge responses", () => {
     }));
     await import("../src/service-worker");
     const listener = vi.mocked(chrome.runtime.onMessage.addListener).mock.calls[0]![0];
-    sendHunt = async (batchOffset = 0, maxIocs = 3) => {
+    sendHunt = async (batchOffset = 0, maxIocs = 3, changes = {}) => {
       const response = await new Promise<BridgeResponse<HuntUiResult>>((resolve) => {
         listener({
           version: 1,
           requestId: crypto.randomUUID(),
           action: "threatIntel.dailyHunt",
-          params: { ...params, batchOffset, maxIocs, size: 5 }
+          params: { ...params, batchOffset, maxIocs, size: 5, ...changes }
         }, {}, resolve);
       });
       if (!response.success) throw new Error(JSON.stringify(response.error));
@@ -567,6 +675,22 @@ describe("IOC hunt bridge responses", () => {
     const second = await sendHunt(500, 5000);
     expect(second).toMatchObject({ campaignId: first.campaignId, createdAt: first.createdAt, batchSize: 100, nextBatchOffset: 600, hasMore: false });
     expect(collect).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses a domain-only queue through the real message handler and retains the selected timestamp in nested hit evidence", async () => {
+    feed = prioritizeThreatIntel([
+      { value: "203.0.113.8", source: provider.name },
+      { value: "matched.example.test", source: provider.name }
+    ], NOW);
+    search.mockImplementationOnce(async ({ iocs }) => ({
+      aggregations: { ioc_matches: { buckets: Object.fromEntries(iocs.map((_ioc, index) => [`ioc_${index}`, {
+        doc_count: 2, latest: { hits: { hits: [{ _index: "logs-fixture", _source: { event: { created: "2026-10-02T11:00:00Z" }, "@timestamp": "2026-10-02T10:00:00Z" } }] } }
+      }])) } }
+    }));
+    const result = await sendHunt(0, 500, { indicatorGroup: "domain", timestampField: "event.created" });
+    expect(result).toMatchObject({ indicatorGroup: "domain", totalAvailable: 1, hunted: 1, matched: 1, coverage: { ip: { checked: 0, totalAvailable: 1 }, domain: { checked: 1 } } });
+    expect(search.mock.calls[0]![0].iocs.every((ioc) => ioc.type === "domain")).toBe(true);
+    expect(result.results[0]).toMatchObject({ hits: [{ timestamp: "2026-10-02T11:00:00Z" }] });
   });
 
   it("returns per-IOC errors with zero hunted and the unchanged retry offset on SIEM failure", async () => {
@@ -589,6 +713,31 @@ describe("IOC hunt bridge responses", () => {
     expect(failed.providers[0]).toMatchObject({ checked: 0, matched: 0 });
     expect((await sendHunt(3)).nextBatchOffset).toBe(6);
     expect(collect).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([{ indexPattern: "logs-other-*" }, { timestampField: "event.created" }, { from: "now/d" }])("reports changed scope as a recoverable hunt error, not an internal/authentication failure: %j", async (changes) => {
+    await sendHunt();
+    await expect(sendHunt(3, 3, changes)).rejects.toThrow('"huntRecovery":"fresh_scan"');
+    expect(search).toHaveBeenCalledTimes(1);
+    expect(storedCampaign().progress.nextBatchOffset).toBe(3);
+    expect(collect).toHaveBeenCalledTimes(1);
+    expect((await sendHunt(0, 3, changes)).nextBatchOffset).toBe(3);
+    expect(search.mock.lastCall?.[0]).toMatchObject(changes);
+  });
+
+  it("reports expiration and missing campaigns with an explicit Fresh Scan recovery", async () => {
+    await expect(sendHunt(3)).rejects.toThrow('"huntRecovery":"fresh_scan"');
+    await sendHunt();
+    vi.setSystemTime(NOW + HUNT_CAMPAIGN_TTL_MS);
+    await expect(sendHunt(3)).rejects.toThrow('"huntRecovery":"fresh_scan"');
+    expect(search).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns the authoritative retry offset without skipping a batch", async () => {
+    await sendHunt();
+    await expect(sendHunt(4)).rejects.toThrow('"nextBatchOffset":3');
+    expect(search).toHaveBeenCalledTimes(1);
+    expect((await sendHunt(3)).nextBatchOffset).toBe(6);
   });
 
   it.each([

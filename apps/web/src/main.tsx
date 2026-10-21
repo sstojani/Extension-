@@ -18,6 +18,8 @@ import {
   FileSearch,
   FolderOpen,
   Gauge,
+  Globe,
+  Hash,
   ListChecks,
   MonitorCog,
   MessageSquare,
@@ -33,7 +35,7 @@ import {
   Trash2,
   X
 } from "lucide-react";
-import type { FleetSummary, KibanaStatus } from "@soc-watch/protocol";
+import type { FleetSummary, KibanaStatus, IocHuntGroup, IocHuntCoverage } from "@soc-watch/protocol";
 import type { DataViewSummary, SanitizedFleetAgent } from "@soc-watch/protocol";
 import {
   DEFAULT_THREAT_RADAR_CARD_RULES,
@@ -45,6 +47,7 @@ import { connectBridgeStream, detectBridgeExtension, getExtensionId, saveExtensi
 import webPackage from "../package.json";
 import "./styles.css";
 import { ServerAgent } from "./ServerAgent";
+import { huntScopeKey, loadIocHuntOffset, saveIocHuntOffset, loadIocHuntCampaignId, saveIocHuntCampaign, resetIocHuntCampaign, huntFailure, type HuntFailure } from "./ioc-hunt";
 
 type Panel = "Dashboard" | "Infrastructure" | "Agents" | "IOC Search" | "IOC Hunt" | "Threat Radar" | "Logs" | "Watchlist" | "Alerts" | "Cases" | "Settings" | "Diagnostics";
 type HuntStatus = "idle" | "running" | "complete";
@@ -113,6 +116,12 @@ type ProviderStatus = {
   message?: string;
 };
 type DailyHuntResponse = {
+  campaignId: string;
+  indicatorGroup: IocHuntGroup;
+  coverage: IocHuntCoverage;
+  stats: { totalAvailable: number };
+  error?: string;
+  alertError?: string;
   providers: ProviderStatus[];
   collected: number;
   hunted: number;
@@ -129,6 +138,7 @@ type DailyHuntResponse = {
   notificationsSent: number;
   notificationsFailed: number;
 };
+type HuntBatchInfo = Pick<DailyHuntResponse, "batchNumber" | "batchOffset" | "batchSize" | "totalAvailable" | "nextBatchOffset" | "hasMore" | "alertsCreated" | "notificationsSent" | "notificationsFailed" | "stats">;
 type ThreatRadarSuspect = {
   ip: string;
   sourceIp: string;
@@ -497,7 +507,6 @@ const ANALYST_FEEDBACK_SUPPRESSION_MS = 7 * 24 * 60 * 60 * 1000;
 const IDENTITY_AUTH_SIGNAL_KEY = "identity_auth";
 const THREAT_RADAR_LAYOUT_KEY = "socWatchThreatRadarLayout";
 const THREAT_RADAR_PINNED_ANALYSIS_KEY = "socWatchThreatRadarPinnedAnalysis";
-const IOC_HUNT_CURSOR_KEY = "socWatchIocHuntCursors";
 
 const THREAT_RADAR_CARD_LABELS: Record<RadarCardId, string> = {
   identity: "Authentication Attack Evidence",
@@ -564,8 +573,13 @@ function App() {
   const [huntFilter, setHuntFilter] = useState<HuntFilter>("all");
   const [huntStatus, setHuntStatus] = useState<HuntStatus>("idle");
   const [huntProgress, setHuntProgress] = useState({ processed: 0, total: 0 });
-  const [huntBatchOffset, setHuntBatchOffset] = useState(() => loadIocHuntOffset("today"));
-  const [huntBatchInfo, setHuntBatchInfo] = useState<Pick<DailyHuntResponse, "batchNumber" | "batchOffset" | "batchSize" | "totalAvailable" | "nextBatchOffset" | "hasMore" | "alertsCreated" | "notificationsSent" | "notificationsFailed"> | null>(null);
+  const [huntBatchOffset, setHuntBatchOffset] = useState(0);
+  const [huntGroup, setHuntGroup] = useState<IocHuntGroup>("ip");
+  const [huntCoverage, setHuntCoverage] = useState<IocHuntCoverage | null>(null);
+  const [huntCampaignId, setHuntCampaignId] = useState<string | undefined>();
+  const [huntMatches, setHuntMatches] = useState<HuntResult[]>([]);
+  const [huntError, setHuntError] = useState<HuntFailure | null>(null);
+  const [huntBatchInfo, setHuntBatchInfo] = useState<HuntBatchInfo | null>(null);
   const [huntProviders, setHuntProviders] = useState<ProviderStatus[]>([]);
   const [huntResults, setHuntResults] = useState<HuntResult[]>([]);
   const [pinnedRadarAnalysis, setPinnedRadarAnalysis] = useState<PinnedThreatRadarAnalysis | null>(() => loadPinnedThreatRadarAnalysis());
@@ -573,6 +587,7 @@ function App() {
   const [radarLoading, setRadarLoading] = useState(false);
   const [radarViewMode, setRadarViewMode] = useState<RadarViewMode>(() => pinnedRadarAnalysis ? "manual" : "automatic");
   const [indexPattern, setIndexPattern] = useState("logs-*");
+  const [timestampField, setTimestampField] = useState("@timestamp");
   const [iocResult, setIocResult] = useState<unknown>(null);
   const [lastError, setLastError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
@@ -603,10 +618,29 @@ function App() {
   const retryAttemptRef = useRef(0);
   const connectionGenerationRef = useRef(0);
   const extensionDetectionGenerationRef = useRef(0);
+  const huntGenerationRef = useRef(0);
+  const bridgeQueryInitializedRef = useRef(false);
+  const huntScope = { indexPattern, timestampField, from: huntTimeRangeToParams(huntTimeRange).from, to: "now" };
+  const currentHuntScopeKey = huntScopeKey(huntScope);
+
+  useEffect(() => {
+    huntGenerationRef.current += 1;
+    setHuntGroup("ip");
+    setHuntBatchOffset(loadIocHuntOffset(huntScope, "ip"));
+    setHuntCampaignId(loadIocHuntCampaignId(huntScope));
+    setHuntCoverage(null);
+    setHuntMatches([]);
+    setHuntBatchInfo(null);
+    setHuntStatus("idle");
+    setHuntResults([]);
+    setHuntProviders([]);
+    setHuntError(null);
+    return () => { huntGenerationRef.current += 1; };
+  }, [currentHuntScopeKey]);
 
   const fleetTotal = useMemo(() => (fleet ? fleet.online + fleet.offline + fleet.error + fleet.inactive : 0), [fleet]);
   const iocHuntReadyScreen = active === "IOC Hunt" && huntStatus === "idle" && huntResults.length === 0;
-  const hideIocHuntChrome = active === "IOC Hunt" && huntStatus !== "complete";
+  const hideIocHuntChrome = active === "IOC Hunt";
   const isThreatRadarView = active === "Threat Radar";
 
   useEffect(() => {
@@ -800,6 +834,11 @@ function App() {
   async function loadBridgeConfig(includeReport = false) {
     const response = await sendBridgeMessage<{ includeReport: boolean }, BridgeConfigResponse>("config.get", { includeReport });
     if (response.success) {
+      if (!bridgeQueryInitializedRef.current && response.data.threatRadarAgent) {
+        bridgeQueryInitializedRef.current = true;
+        setIndexPattern(response.data.threatRadarAgent.indexPattern);
+        setTimestampField(response.data.threatRadarAgent.timestampField);
+      }
       setApiKeyStatus("Saved keys checked");
       setExtensionVersion(response.data.extensionVersion ?? null);
       setThreatFoxAuthKeySaved(Boolean(response.data.threatFoxAuthKeySaved));
@@ -849,7 +888,8 @@ function App() {
     setLastError(null);
     const response = await sendBridgeMessage<ThreatRadarAgentConfig, { config: ThreatRadarAgentConfig; state: ThreatRadarAgentState }>("threatRadar.agent.configure", {
       ...threatRadarAgent,
-      indexPattern
+      indexPattern,
+      timestampField
     });
     if (!response.success) {
       setLastError(response.error.message);
@@ -939,7 +979,6 @@ function App() {
     const response = await sendBridgeMessage<unknown, DataViewSummary[]>("dataViews.list", {});
     if (response.success) {
       setDataViews(response.data);
-      if (response.data[0]?.title) setIndexPattern(response.data[0].title);
     } else {
       setLastError(response.error.message);
     }
@@ -953,7 +992,7 @@ function App() {
     const response = await sendBridgeMessage("ioc.search", {
       value: iocValue,
       indexPattern,
-      timestampField: "@timestamp",
+      timestampField,
       from: "now-24h",
       to: "now",
       size: 25
@@ -965,59 +1004,90 @@ function App() {
 
   function changeHuntTimeRange(value: HuntTimeRange) {
     setHuntTimeRange(value);
-    setHuntBatchOffset(loadIocHuntOffset(value));
-    setHuntBatchInfo(null);
-    setHuntStatus("idle");
-    setHuntResults([]);
-    setHuntProviders([]);
   }
 
-  async function runIocHunt(fresh = false) {
-    const timeRange = huntTimeRangeToParams(huntTimeRange);
-    const batchOffset = fresh ? 0 : huntBatchInfo?.hasMore === false ? 0 : huntBatchOffset;
+  async function runIocHunt(fresh = false, group: IocHuntGroup = huntGroup) {
+    if (huntStatus === "running") return;
+    const generation = ++huntGenerationRef.current;
+    const batchOffset = fresh ? 0 : group === huntGroup ? huntBatchOffset : huntCoverage?.[group].nextBatchOffset ?? loadIocHuntOffset(huntScope, group);
+    const campaignId = fresh ? undefined : huntCampaignId ?? loadIocHuntCampaignId(huntScope);
+    const resumeCampaign = !fresh && (campaignId !== undefined || batchOffset > 0 || (group === huntGroup && huntBatchInfo !== null && huntError?.recovery === "retry"));
+    setHuntGroup(group);
+    setHuntBatchOffset(batchOffset);
+    setHuntFilter(group);
     if (fresh) {
       setHuntBatchOffset(0);
       setHuntBatchInfo(null);
-      saveIocHuntOffset(huntTimeRange, 0);
+      setHuntCoverage(null);
+      setHuntCampaignId(undefined);
+      setHuntMatches([]);
+      resetIocHuntCampaign(huntScope);
     }
     setHuntStatus("running");
     setHuntProgress({ processed: 0, total: DAILY_HUNT_BATCH_SIZE });
+    setHuntBatchInfo(null);
     setHuntProviders([]);
     setHuntResults([]);
-    setLastError(null);
+    setHuntError(null);
 
-    const response = await sendBridgeMessage<unknown, DailyHuntResponse>("threatIntel.dailyHunt", {
-      indexPattern,
-      timestampField: "@timestamp",
-      from: timeRange.from,
-      to: "now",
-      size: 5,
-      maxIocs: DAILY_HUNT_BATCH_SIZE,
-      batchOffset
-    });
-
-    if (response.success) {
-      setHuntProviders(response.data.providers);
-      setHuntResults(response.data.results);
-      setHuntBatchInfo({
-        batchNumber: response.data.batchNumber,
-        batchOffset: response.data.batchOffset,
-        batchSize: response.data.batchSize,
-        totalAvailable: response.data.totalAvailable,
-        nextBatchOffset: response.data.nextBatchOffset,
-        hasMore: response.data.hasMore,
-        alertsCreated: response.data.alertsCreated,
-        notificationsSent: response.data.notificationsSent,
-        notificationsFailed: response.data.notificationsFailed
+    try {
+      const response = await sendBridgeMessage<unknown, DailyHuntResponse>("threatIntel.dailyHunt", {
+        ...huntScope,
+        size: 5,
+        maxIocs: DAILY_HUNT_BATCH_SIZE,
+        batchOffset,
+        indicatorGroup: group,
+        resumeCampaign,
+        ...(campaignId ? { campaignId } : {})
       });
-      setHuntBatchOffset(response.data.nextBatchOffset);
-      saveIocHuntOffset(huntTimeRange, response.data.nextBatchOffset >= response.data.totalAvailable ? 0 : response.data.nextBatchOffset);
-      setHuntProgress({ processed: response.data.hunted, total: response.data.hunted });
-    } else {
-      setLastError(response.error.message);
+      if (generation !== huntGenerationRef.current) return;
+
+      if (response.success) {
+        if (!response.data.coverage || !response.data.campaignId) {
+          throw new Error("Reload the updated SOC Watch Bridge extension before running type-specific hunts.");
+        }
+        if (response.data.indicatorGroup !== group) throw new Error("IOC Hunt returned a different indicator type. Reload the updated extension and retry.");
+        setHuntProviders(response.data.providers);
+        setHuntResults(response.data.results);
+        setHuntBatchInfo({
+          batchNumber: response.data.batchNumber,
+          batchOffset: response.data.batchOffset,
+          batchSize: response.data.batchSize,
+          totalAvailable: response.data.totalAvailable,
+          nextBatchOffset: response.data.nextBatchOffset,
+          hasMore: response.data.hasMore,
+          alertsCreated: response.data.alertsCreated,
+          notificationsSent: response.data.notificationsSent,
+          notificationsFailed: response.data.notificationsFailed,
+          stats: response.data.stats
+        });
+        setHuntCoverage(response.data.coverage);
+        setHuntCampaignId(response.data.campaignId);
+        setHuntBatchOffset(response.data.nextBatchOffset);
+        saveIocHuntCampaign(huntScope, response.data.campaignId, response.data.coverage);
+        if (!response.data.error) setHuntMatches((previous) => {
+          const merged = new Map(previous.map((result) => [`${result.ioc.type}:${result.ioc.normalized}`, result]));
+          for (const result of response.data.results) if (result.total > 0) merged.set(`${result.ioc.type}:${result.ioc.normalized}`, result);
+          return [...merged.values()];
+        });
+        setHuntProgress({ processed: response.data.hunted, total: response.data.hunted });
+        if (response.data.error) setHuntError({ message: response.data.error, recovery: "retry" });
+        else if (response.data.alertError) setHuntError({ message: `IOC checks completed, but alert processing failed: ${response.data.alertError}`, recovery: "alert_delivery" });
+      } else {
+        const failure = huntFailure(response.error);
+        setHuntError(failure);
+        if (failure.nextBatchOffset !== undefined) {
+          setHuntBatchOffset(failure.nextBatchOffset);
+          saveIocHuntOffset(huntScope, failure.nextBatchOffset, group);
+          setHuntCoverage((previous) => previous ? { ...previous, [group]: { ...previous[group], nextBatchOffset: failure.nextBatchOffset! } } : null);
+        }
+        setHuntProgress({ processed: 0, total: 0 });
+      }
+    } catch (error) {
+      if (generation !== huntGenerationRef.current) return;
+      setHuntError({ message: error instanceof Error ? error.message : "IOC Hunt could not complete. Check the extension and retry this batch.", recovery: "retry" });
       setHuntProgress({ processed: 0, total: 0 });
     }
-
     setHuntStatus("complete");
   }
 
@@ -1027,7 +1097,7 @@ function App() {
     setLastError(null);
     const response = await sendBridgeMessage<unknown, ThreatRadarResponse>("threatRadar.analyze", {
       indexPattern,
-      timestampField: "@timestamp",
+      timestampField,
       from: timeRange.from,
       to: "now",
       size: 50
@@ -1171,6 +1241,7 @@ function App() {
           <SettingsPanel
             dataViews={dataViews}
             indexPattern={indexPattern}
+            timestampField={timestampField}
             extensionId={extensionId}
             threatFoxAuthKey={threatFoxAuthKey}
             threatFoxAuthKeySaved={threatFoxAuthKeySaved}
@@ -1179,7 +1250,16 @@ function App() {
             googleThreatIntelApiKey={googleThreatIntelApiKey}
             googleThreatIntelApiKeySaved={googleThreatIntelApiKeySaved}
             apiKeyStatus={apiKeyStatus}
-            onIndexPatternChange={setIndexPattern}
+            onIndexPatternChange={(value) => { bridgeQueryInitializedRef.current = true; setIndexPattern(value); }}
+            onTimestampFieldChange={(value) => { bridgeQueryInitializedRef.current = true; setTimestampField(value); setThreatRadarAgent((config) => ({ ...config, timestampField: value })); }}
+            onDataViewSelect={(view) => {
+              bridgeQueryInitializedRef.current = true;
+              setIndexPattern(view.title);
+              if (view.timeFieldName) {
+                setTimestampField(view.timeFieldName);
+                setThreatRadarAgent((config) => ({ ...config, timestampField: view.timeFieldName! }));
+              }
+            }}
             onExtensionIdChange={setExtensionId}
             onThreatFoxAuthKeyChange={setThreatFoxAuthKey}
             onMalwareBazaarAuthKeyChange={setMalwareBazaarAuthKey}
@@ -1209,6 +1289,11 @@ function App() {
         {active === "Infrastructure" ? <Infrastructure agents={agents} /> : null}
         {active === "IOC Hunt" ? (
           <IOCHunt
+            group={huntGroup}
+            coverage={huntCoverage}
+            confirmedMatches={huntMatches}
+            queryLabel={`${indexPattern} | ${timestampField}`}
+            error={huntError}
             timeRange={huntTimeRange}
             filter={huntFilter}
             status={huntStatus}
@@ -1220,6 +1305,7 @@ function App() {
             onFilterChange={setHuntFilter}
             onHunt={() => void runIocHunt(false)}
             onFreshHunt={() => void runIocHunt(true)}
+            onGroupHunt={(group) => void runIocHunt(false, group)}
           />
         ) : null}
         {active === "Threat Radar" ? (
@@ -1601,6 +1687,7 @@ function Infrastructure({ agents }: { agents: SanitizedFleetAgent[] }) {
 function SettingsPanel({
   dataViews,
   indexPattern,
+  timestampField,
   extensionId,
   threatFoxAuthKey,
   threatFoxAuthKeySaved,
@@ -1610,6 +1697,8 @@ function SettingsPanel({
   googleThreatIntelApiKeySaved,
   apiKeyStatus,
   onIndexPatternChange,
+  onTimestampFieldChange,
+  onDataViewSelect,
   onExtensionIdChange,
   onThreatFoxAuthKeyChange,
   onMalwareBazaarAuthKeyChange,
@@ -1627,6 +1716,7 @@ function SettingsPanel({
 }: {
   dataViews: DataViewSummary[];
   indexPattern: string;
+  timestampField: string;
   extensionId: string;
   threatFoxAuthKey: string;
   threatFoxAuthKeySaved: boolean;
@@ -1636,6 +1726,8 @@ function SettingsPanel({
   googleThreatIntelApiKeySaved: boolean;
   apiKeyStatus: string;
   onIndexPatternChange: (value: string) => void;
+  onTimestampFieldChange: (value: string) => void;
+  onDataViewSelect: (view: DataViewSummary) => void;
   onExtensionIdChange: (value: string) => void;
   onThreatFoxAuthKeyChange: (value: string) => void;
   onMalwareBazaarAuthKeyChange: (value: string) => void;
@@ -2041,6 +2133,10 @@ function SettingsPanel({
           <span>Selected index pattern</span>
           <input value={indexPattern} onChange={(event) => onIndexPatternChange(event.target.value)} />
         </label>
+        <label className="field">
+          <span>Query timestamp field</span>
+          <input value={timestampField} maxLength={256} onChange={(event) => onTimestampFieldChange(event.target.value)} />
+        </label>
         <div className="table-wrap">
           <table>
             <thead>
@@ -2061,7 +2157,7 @@ function SettingsPanel({
                     <td>{view.title}</td>
                     <td>{view.timeFieldName ?? "--"}</td>
                     <td>
-                      <button className="icon-button" aria-label={`Use ${view.title}`} onClick={() => onIndexPatternChange(view.title)}>
+                      <button className="icon-button" aria-label={`Use ${view.title}`} onClick={() => onDataViewSelect(view)}>
                         <ShieldCheck size={16} aria-hidden="true" />
                       </button>
                     </td>
@@ -2250,6 +2346,11 @@ function IOCSearch({
 }
 
 function IOCHunt({
+  group,
+  coverage,
+  confirmedMatches,
+  queryLabel,
+  error,
   timeRange,
   filter,
   status,
@@ -2260,33 +2361,41 @@ function IOCHunt({
   onTimeRangeChange,
   onFilterChange,
   onHunt,
-  onFreshHunt
+  onFreshHunt,
+  onGroupHunt
 }: {
+  group: IocHuntGroup;
+  coverage: IocHuntCoverage | null;
+  confirmedMatches: HuntResult[];
+  queryLabel: string;
+  error: HuntFailure | null;
   timeRange: HuntTimeRange;
   filter: HuntFilter;
   status: HuntStatus;
   progress: { processed: number; total: number };
-  batchInfo: Pick<DailyHuntResponse, "batchNumber" | "batchOffset" | "batchSize" | "totalAvailable" | "nextBatchOffset" | "hasMore" | "alertsCreated" | "notificationsSent" | "notificationsFailed"> | null;
+  batchInfo: HuntBatchInfo | null;
   providers: ProviderStatus[];
   results: HuntResult[];
   onTimeRangeChange: (value: HuntTimeRange) => void;
   onFilterChange: (value: HuntFilter) => void;
   onHunt: () => void;
   onFreshHunt: () => void;
+  onGroupHunt: (group: IocHuntGroup) => void;
 }) {
-  const stagedProgress = useAnimatedHuntStages(status, progress.total || DAILY_HUNT_BATCH_SIZE);
-  const matched = results.filter((result) => result.total > 0);
+  const matched = confirmedMatches;
   const filteredMatches = matched.filter((result) => matchesHuntFilter(result.ioc.type, filter));
   const first = matched[0]?.ioc ?? results[0]?.ioc;
-  const collected = batchInfo?.totalAvailable ?? providers.reduce((sum, provider) => sum + provider.collected, 0);
-  const checked = results.length;
+  const collected = batchInfo?.stats.totalAvailable ?? coverage?.all.totalAvailable ?? 0;
+  const checked = progress.processed;
   const healthySources = providers.filter((provider) => provider.status === "healthy").length;
-  const typeStats = buildHuntTypeStats(results);
+  const typeStats = buildHuntTypeStats(matched);
+  const groupLabel = group === "ip" ? "IP" : group === "domain" ? "Domain" : group === "hash" ? "Hash" : group === "url" ? "URL" : "IOC";
 
-  if (status !== "running" && results.length === 0) {
+  if (status === "idle") {
     return (
       <section className="hunt-start-screen" aria-label="Start IOC Hunt">
         <TimeRangePicker value={timeRange} onChange={onTimeRangeChange} />
+        <button className="secondary" onClick={onFreshHunt}><RefreshCw size={16} aria-hidden="true" />Fresh Scan</button>
         <button className="primary mega-hunt-button" onClick={onHunt}>
           <Radar size={42} aria-hidden="true" />
           <span>IOC Hunt</span>
@@ -2311,30 +2420,47 @@ function IOCHunt({
           <span className="scope-blip four" />
         </div>
         <div className="scope-copy">
-          <h2>IOC Hunt in progress</h2>
-          <p>Scanning threat-intel feeds, normalizing indicators, and checking Elastic for internal matches.</p>
-          <div className="hunt-stage-grid">
-            <StageCard label="Vendor feeds" current={stagedProgress.vendors} total={progress.total || DAILY_HUNT_BATCH_SIZE} />
-            <StageCard label="Normalization" current={stagedProgress.normalized} total={progress.total || DAILY_HUNT_BATCH_SIZE} />
-            <StageCard label="SIEM checks" current={stagedProgress.checked} total={progress.total || DAILY_HUNT_BATCH_SIZE} />
-          </div>
-          <p className="scope-finalizing">Checking this {progress.total || DAILY_HUNT_BATCH_SIZE}-indicator batch in Elastic...</p>
+          <h2>{groupLabel} Hunt in progress</h2>
+          <p className="hunt-query-label">{queryLabel}</p>
+          <RefreshCw size={24} className="spin" aria-hidden="true" />
+          <p className="scope-finalizing">Waiting for Elastic to confirm up to {DAILY_HUNT_BATCH_SIZE} {groupLabel.toLowerCase()} checks.</p>
         </div>
       </section>
     );
   }
 
   return (
-    <section className="grid">
+    <section className="grid ioc-hunt-view">
+      <section className="hunt-type-actions wide" aria-label="Indicator hunts">
+        {([
+          { group: "ip", label: "Search IPs", icon: Radar },
+          { group: "domain", label: "Search Domains", icon: Globe },
+          { group: "hash", label: "Search Hashes", icon: Hash },
+          { group: "url", label: "Search URLs", icon: ExternalLink }
+        ] as const).map((item) => {
+          const queue = coverage?.[item.group];
+          return <button key={item.group} className={`hunt-type-action ${group === item.group ? "selected" : ""}`}
+            onClick={() => onGroupHunt(item.group)} disabled={error?.recovery === "fresh_scan" || queue?.hasMore === false}>
+            <item.icon size={24} aria-hidden="true" />
+            <span>{item.label}</span>
+            <small>{queue ? `${queue.checked.toLocaleString()} / ${queue.totalAvailable.toLocaleString()} checked${queue.excluded > 0 ? ` | ${queue.excluded} excluded` : ""}${queue.totalAvailable === 0 ? " | No indicators" : !queue.hasMore ? " | Complete" : ""}` : "Not checked"}</small>
+          </button>;
+        })}
+      </section>
+      {error ? <section className="notice wide hunt-error" role="alert" aria-label="IOC Hunt error">
+        <AlertTriangle size={18} aria-hidden="true" />
+        <div><strong>IOC Hunt needs attention</strong><span>{error.message}</span></div>
+      </section> : null}
       <div className="panel wide">
         <div className="hunt-dashboard-head">
           <div>
             <h2>IOC Hunt</h2>
-            <p className="muted compact-copy">Showing SIEM matches only. Feed collection and checked coverage are below.</p>
+            <p className="hunt-query-label">{queryLabel}</p>
             {batchInfo ? (
               <p className="hunt-batch-summary">
-                Risk-ranked batch {batchInfo.batchNumber}: indicators {batchInfo.batchOffset + 1}-{batchInfo.batchOffset + batchInfo.batchSize} of {batchInfo.totalAvailable} checked
-                {batchInfo.hasMore ? " | Run Again checks the next batch" : " | All collected batches checked"}
+                {groupLabel} batch {batchInfo.batchNumber}: {checked} IOCs checked from {batchInfo.totalAvailable} available
+                {checked > 0 ? ` | Indicators ${batchInfo.batchOffset + 1}-${batchInfo.nextBatchOffset}` : ""}
+                {error && checked === 0 ? " | Search incomplete; batch position retained" : batchInfo.hasMore ? " | Run Again checks the next batch" : " | All collected batches checked"}
                 {batchInfo.alertsCreated > 0 ? ` | ${batchInfo.alertsCreated} alert${batchInfo.alertsCreated === 1 ? "" : "s"} created` : ""}
                 {batchInfo.notificationsSent > 0 ? ` | ${batchInfo.notificationsSent} notification${batchInfo.notificationsSent === 1 ? "" : "s"} sent` : ""}
               </p>
@@ -2346,20 +2472,20 @@ function IOCHunt({
               <RefreshCw size={18} aria-hidden="true" />
               <span>Fresh Scan</span>
             </button>
-            <button className="primary large-action" onClick={onHunt}>
+            <button className="primary large-action" onClick={onHunt} disabled={error?.recovery === "fresh_scan" || batchInfo?.hasMore === false}>
               <Play size={18} aria-hidden="true" />
-              <span>{batchInfo?.hasMore === false ? "Restart Batches" : "Run Again"}</span>
+              <span>{error && error.recovery !== "alert_delivery" ? "Retry Batch" : batchInfo?.hasMore === false ? "Batch Complete" : "Run Again"}</span>
             </button>
           </div>
         </div>
 
-        <div className="hunt-complete-grid">
+        {batchInfo ? <div className="hunt-complete-grid">
           <div className="hunt-controls panel-surface">
             <div className="result-metrics compact-metrics">
               <StatusTile label="Feeds Healthy" value={String(healthySources)} tone={healthySources ? "healthy" : "unknown"} />
               <StatusTile label="IOCs Collected" value={String(collected)} tone={collected ? "healthy" : "unknown"} />
               <StatusTile label="IOCs Checked" value={String(checked)} tone={checked ? "healthy" : "unknown"} />
-              <StatusTile label="SIEM Matches" value={String(matched.length)} tone={matched.length ? "critical" : "unknown"} />
+              <StatusTile label="SIEM Matches (Campaign)" value={String(matched.length)} tone={matched.length ? "critical" : "unknown"} />
             </div>
             <HuntFilterCards stats={typeStats} active={filter} onChange={onFilterChange} />
             <IntelPivots ioc={first} />
@@ -2368,7 +2494,7 @@ function IOCHunt({
             <h3>Threat Feed Coverage</h3>
             <ProviderStatusGrid providers={providers} />
           </div>
-        </div>
+        </div> : null}
 
       </div>
 
@@ -2377,7 +2503,8 @@ function IOCHunt({
           <Radar size={18} aria-hidden="true" />
           <h2>Hunt Results</h2>
         </div>
-        <HuntResultCards results={filteredMatches} hasRun={results.length > 0} />
+        {error && checked === 0 ? <div className="empty-card"><strong>IOC checks incomplete.</strong><span>No SIEM result is confirmed for this batch. Earlier confirmed matches are retained.</span></div> : null}
+        {!(error && checked === 0 && filteredMatches.length === 0) ? <HuntResultCards results={filteredMatches} hasRun /> : null}
       </div>
     </section>
   );
@@ -3717,20 +3844,6 @@ function TimeRangePicker({ value, onChange }: { value: HuntTimeRange; onChange: 
   );
 }
 
-function StageCard({ label, current, total }: { label: string; current: number; total: number }) {
-  const state = current >= total ? "done" : current > 0 ? "working" : "queued";
-  const percent = total > 0 ? Math.min(100, Math.round((current / total) * 100)) : 0;
-  return (
-    <div className={`stage-card ${state}`} style={{ "--progress": `${percent}%` } as React.CSSProperties}>
-      <strong>{label}</strong>
-      <span>{current} / {total}</span>
-      <div className="stage-progress" aria-hidden="true">
-        <i />
-      </div>
-    </div>
-  );
-}
-
 function HuntResultCards({ results, hasRun }: { results: HuntResult[]; hasRun: boolean }) {
   if (results.length === 0) {
     return (
@@ -4581,24 +4694,6 @@ function huntTimeRangeToParams(range: HuntTimeRange): { from: string } {
   return { from: "now-30d" };
 }
 
-function loadIocHuntOffset(range: HuntTimeRange): number {
-  try {
-    const stored = JSON.parse(localStorage.getItem(IOC_HUNT_CURSOR_KEY) ?? "{}") as Record<string, unknown>;
-    return typeof stored[range] === "number" && Number.isInteger(stored[range]) && stored[range] >= 0 ? stored[range] : 0;
-  } catch {
-    return 0;
-  }
-}
-
-function saveIocHuntOffset(range: HuntTimeRange, offset: number): void {
-  try {
-    const stored = JSON.parse(localStorage.getItem(IOC_HUNT_CURSOR_KEY) ?? "{}") as Record<string, unknown>;
-    localStorage.setItem(IOC_HUNT_CURSOR_KEY, JSON.stringify({ ...stored, [range]: Math.max(0, Math.floor(offset)) }));
-  } catch {
-    // A missing cursor only causes the next hunt to start from batch one.
-  }
-}
-
 function threatRadarTimeRangeToParams(range: RadarTimeRange): { from: string } {
   if (range === "last15m") return { from: "now-15m" };
   if (range === "last1h") return { from: "now-1h" };
@@ -4942,31 +5037,6 @@ function getGtiCategoryWeight(gti: ThreatRadarSuspect["gti"]): number {
   if (category === "Suspicious") return 2;
   if (category === "Unknown") return 1;
   return 0;
-}
-
-function useAnimatedHuntStages(status: HuntStatus, total: number): { vendors: number; normalized: number; checked: number } {
-  const [tick, setTick] = useState(0);
-
-  useEffect(() => {
-    if (status !== "running") {
-      setTick(0);
-      return;
-    }
-
-    const id = window.setInterval(() => {
-      setTick((value) => value + 1);
-    }, 360);
-
-    return () => window.clearInterval(id);
-  }, [status]);
-
-  const ceiling = Math.max(0, total);
-  const pendingCeiling = ceiling > 1 ? ceiling - 1 : ceiling;
-  return {
-    vendors: Math.min(ceiling, tick * 10),
-    normalized: Math.min(ceiling, Math.max(0, tick - 5) * 9),
-    checked: Math.min(pendingCeiling, Math.max(0, tick - 11) * 7)
-  };
 }
 
 function matchesHuntFilter(type: string, filter: HuntFilter): boolean {

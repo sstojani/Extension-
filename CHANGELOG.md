@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.16.4 - 2026-10-11
+
+- Start browser IOC Hunt with IPs; add dedicated IP, domain, hash (MD5/SHA-1/SHA-256), and URL actions in place of redundant connection/Fleet tiles. Each type keeps an independent, non-overlapping queue of at most 500 from the same ranked feed snapshot and selected query window.
+- Keep confirmed matches across successful batches, deduplicated by indicator, until Fresh Scan or query changes. Show per-type checked/available coverage; empty/exhausted queues do not refetch or repeat. Failed batches retain their own retry cursor without advancing other types.
+- Expand exact ECS searches to related/DNS IPs, source/client/server domains, and file/process/parent/related hashes. Preserve the selected timestamp in hit evidence. Matches mean observed IOC presence, not automatic proof of compromise.
+- Persist per-type cursors with campaign identity; reject stale tabs when another Fresh Scan replaces their snapshot. Preserve legacy mixed campaigns and all existing exclusion, lock, query-scope, and storage safeguards.
+- Remove simulated scan counters; the waiting view does not count indicators as checked before Elastic confirms results. Add mixed-feed, algorithm, recovery, and desktop/mobile browser regressions.
+
+## 0.16.3 - 2026-10-10
+
+- Fix IOC Hunt progress after query changes: cursors belong to the exact index, timestamp field and time range, matching the extension's single active campaign.
+- Report expired, changed and missing campaigns with actionable Fresh Scan recovery rather than generic authentication errors. Keep failed batches retryable, including batch one, and count only successfully checked IOCs.
+- Do not change the selected index when loading data views. Explicit selection uses the view's time field; manual searches initialize from saved bridge query settings.
+- Keep hunt failures visible independently of connection health refreshes, provide Fresh Scan before and after a run, and ignore results from superseded query requests.
+
 ## 0.16.2 - 2026-10-04
 
 - Fix oversized Server Agent state refreshes by sending compact finding, investigation and run summaries, without bulk evidence, review notes, investigation timelines or snapshot cursors. Project records individually to avoid retaining all full proof bundles in overview memory.

@@ -284,6 +284,18 @@ export const dataViewGetParamsSchema = z
   })
   .strict();
 
+export const DEFAULT_IOC_FIELD_MAPPING: IOCFieldMapping = {
+  ip: ["source.ip", "destination.ip", "client.ip", "server.ip", "host.ip", "related.ip", "dns.resolved_ip"],
+  domain: ["url.domain", "dns.question.name", "destination.domain", "source.domain", "client.domain", "server.domain"],
+  url: ["url.full", "url.original"],
+  md5: ["file.hash.md5", "process.hash.md5", "process.parent.hash.md5", "related.hash"],
+  sha1: ["file.hash.sha1", "process.hash.sha1", "process.parent.hash.sha1", "related.hash"],
+  sha256: ["file.hash.sha256", "process.hash.sha256", "process.parent.hash.sha256", "related.hash"]
+};
+export const iocHuntGroupSchema = z.enum(["all", "ip", "domain", "hash", "url"]);
+export type IocHuntGroup = z.infer<typeof iocHuntGroupSchema>;
+export type IocHuntCoverage = Record<IocHuntGroup, { totalAvailable: number; checked: number; excluded: number; nextBatchOffset: number; hasMore: boolean }>;
+
 export const iocSearchParamsSchema = z
   .object({
     value: nonEmptyString,
@@ -294,12 +306,12 @@ export const iocSearchParamsSchema = z
     size: z.number().int().min(0).max(100).default(25),
     fieldMapping: z
       .object({
-        ip: z.array(z.string()).max(20).default(["source.ip", "destination.ip", "client.ip", "server.ip", "host.ip"]),
-        domain: z.array(z.string()).max(20).default(["url.domain", "dns.question.name", "destination.domain"]),
-        url: z.array(z.string()).max(20).default(["url.full", "url.original"]),
-        md5: z.array(z.string()).max(20).default(["file.hash.md5"]),
-        sha1: z.array(z.string()).max(20).default(["file.hash.sha1"]),
-        sha256: z.array(z.string()).max(20).default(["file.hash.sha256"])
+        ip: z.array(z.string()).max(20).default(DEFAULT_IOC_FIELD_MAPPING.ip),
+        domain: z.array(z.string()).max(20).default(DEFAULT_IOC_FIELD_MAPPING.domain),
+        url: z.array(z.string()).max(20).default(DEFAULT_IOC_FIELD_MAPPING.url),
+        md5: z.array(z.string()).max(20).default(DEFAULT_IOC_FIELD_MAPPING.md5),
+        sha1: z.array(z.string()).max(20).default(DEFAULT_IOC_FIELD_MAPPING.sha1),
+        sha256: z.array(z.string()).max(20).default(DEFAULT_IOC_FIELD_MAPPING.sha256)
       })
       .default({})
   })
@@ -313,7 +325,10 @@ export const dailyIocHuntParamsSchema = z
     to: z.string().min(1).max(128).default("now"),
     size: z.number().int().min(0).max(25).default(5),
     maxIocs: z.number().int().min(1).max(5000).default(500),
-    batchOffset: z.number().int().min(0).max(1000000).default(0)
+    batchOffset: z.number().int().min(0).max(1000000).default(0),
+    resumeCampaign: z.boolean().optional(),
+    indicatorGroup: iocHuntGroupSchema.default("all"),
+    campaignId: z.string().uuid().optional()
   })
   .strict();
 

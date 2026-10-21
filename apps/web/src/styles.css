@@ -1712,6 +1712,66 @@ textarea:focus-visible {
   gap: 14px;
 }
 
+.hunt-type-actions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.ioc-hunt-view { grid-template-columns: minmax(0, 1fr); }
+.ioc-hunt-view > *, .ioc-hunt-view .ranked-ioc-card { min-width: 0; }
+.ioc-hunt-view .mini-table-wrap { max-width: 100%; }
+.ioc-hunt-view .ranked-card-leader {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) repeat(3, minmax(0, 1fr));
+}
+.ioc-hunt-view .provider-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); }
+.ioc-hunt-view .provider-card { min-width: 0; overflow-wrap: anywhere; }
+
+.hunt-type-action {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-content: center;
+  align-items: center;
+  text-align: left;
+  gap: 10px;
+  min-height: 112px;
+  padding: 18px;
+  border: 1px solid #41506a;
+  border-radius: 8px;
+  background: #131f30;
+  color: #e4edf5;
+  font-size: 1.1rem;
+}
+
+.hunt-type-action small {
+  grid-column: 1 / -1;
+  color: #a9bdd1;
+  font-size: 0.85rem;
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+
+.hunt-type-action.selected {
+  border-color: #22c55e;
+  background: #14332c;
+}
+
+.hunt-type-action:disabled { opacity: 0.7; cursor: not-allowed; }
+.hunt-query-label { overflow-wrap: anywhere; color: #a9bdd1; font-size: 0.875rem; }
+
+@media (max-width: 1100px) {
+  .hunt-type-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 540px) {
+  .hunt-type-actions { grid-template-columns: minmax(0, 1fr); }
+  .hunt-type-action { min-height: 96px; }
+  .ioc-hunt-view .ranked-card-head { align-items: flex-start; flex-direction: column; }
+  .ioc-hunt-view .ranked-card-leader { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ioc-hunt-view .ranked-card-leader > div:first-child { grid-column: 1 / -1; }
+}
+
 .hunt-controls {
   display: grid;
   gap: 12px;
@@ -1741,6 +1801,15 @@ textarea:focus-visible {
   color: #bbf7d0;
   font-family: "Fira Code", ui-monospace, monospace;
   font-size: 0.82rem;
+}
+
+.hunt-error {
+  grid-column: 1 / -1;
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.hunt-error div {
+  overflow-wrap: anywhere;
 }
 
 .hero-action {

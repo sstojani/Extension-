@@ -1,4 +1,4 @@
-# Persistent Server Agent (0.16.2)
+# Persistent Server Agent (0.16.4)
 
 ## What Changes
 
@@ -55,7 +55,7 @@ The unit creates `/var/lib/soc-watch` owned by `socwatch` and allows writes only
 
 ## Connect The Work Browser
 
-1. Open the hosted console on the work computer that can reach Kibana. Download Bridge v0.16.2 from the installation page, fully extract it to a permanent folder and load the folder containing `manifest.json` at `chrome://extensions`. Reload the console once. For updates, replace the contents of that same permanent folder and reload the existing extension; do not remove it first or switch profiles.
+1. Open the hosted console on the work computer that can reach Kibana. Download Bridge v0.16.4 from the installation page, fully extract it to a permanent folder and load the folder containing `manifest.json` at `chrome://extensions`. Reload the console once. For updates, replace the contents of that same permanent folder and reload the existing extension; do not remove it first or switch profiles.
 2. Set the correct Kibana URL/space in the Bridge settings and open a signed-in Kibana tab in the same browser profile.
 3. Sign in to Server Agent with an administrator token. In **Agent Settings**, click **Load Kibana data views** and explicitly choose the time-based log view used in Discover, or enter the exact index/time field manually. Selection changes only the draft: review the index, timestamp and infrastructure fields and click **Save settings**, then **Connect this browser**. This explicitly authorizes returning log evidence to the SOC Watch server. Obtain your organization's approval before moving security telemetry to a home-hosted service.
 4. Verify **This browser connected**, run a Live scan, then explicitly enable **Live monitoring enabled**. Existing disabled schedules remain disabled after upgrade. Both this console tab and the authenticated work browser must remain open. In Delivery, enable browser notifications and grant Chrome permission, or configure an enabled webhook/Discord/Telegram channel and test its delivery.
@@ -132,7 +132,7 @@ Analysts can acknowledge, assign, annotate, resolve and reopen findings. Clear F
 
 ## IOC Campaigns
 
-Browser IOC Hunt saves an immutable ranked vendor snapshot. Fresh Scan collects a new snapshot; Run Again uses the next non-overlapping batch, at most 500. Failed queries retain retry progress. Changing the hunt query or expiration requires Fresh Scan. Snapshots are bounded to fit extension storage; truncation metadata remains explicit.
+Browser IOC Hunt saves an immutable ranked vendor snapshot. The first hunt checks IPs. Search IPs, Search Domains, Search Hashes, and Search URLs use independent queues from that same snapshot, with at most 500 indicators per batch and the same selected time range/index/timestamp field. Hash hunts include MD5, SHA-1, and SHA-256. Run Again advances only the current type; switching types resumes its saved position, including after reload. Failed queries retain their type's retry progress. Empty or exhausted queues do not refetch or reset automatically. Confirmed matches accumulate in the open console until Fresh Scan or query changes; a feed match is IOC presence, not a compromised-host verdict. Fresh Scan collects a new snapshot and clears every type's cursor and displayed matches. Campaign identity prevents another tab's replacement from silently mixing snapshots. Changing the hunt query or expiration requires Fresh Scan. Snapshots are bounded to fit extension storage; truncation metadata remains explicit. Search fields include exact ECS network/DNS IPs, domains, and file/process/related hashes; missing telemetry can still produce no matches.
 
 The server can separately enable automated IOC campaigns. It collects Feodo's recommended current C2 list, OpenPhish, and keyed ThreatFox/MalwareBazaar feeds, freezes a one-day snapshot, and checks up to 500 IOCs per batch using paginated exact-match queries. A failed batch does not advance. Feed priority is a hunting order, not a malicious verdict; provider provenance and coverage/errors are retained. Identical data from multiple feeds is not counted as independent corroboration. Other browser feed vendors are still available in IOC Hunt.
 

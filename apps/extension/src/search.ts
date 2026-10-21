@@ -1,5 +1,6 @@
 import type { ClassifiedIOC } from "@soc-watch/ioc";
 import type { IOCFieldMapping } from "@soc-watch/protocol";
+import { DEFAULT_IOC_FIELD_MAPPING } from "@soc-watch/protocol";
 
 export interface IOCSearchBodyParams {
   ioc: ClassifiedIOC;
@@ -50,19 +51,12 @@ export function buildIOCSearchBody(params: IOCSearchBodyParams) {
   };
 }
 
-const DEFAULT_IOC_FIELDS: Record<string, string[]> = {
-  ip: ["source.ip", "destination.ip", "client.ip", "server.ip", "host.ip"],
-  domain: ["url.domain", "dns.question.name", "destination.domain"],
-  url: ["url.full", "url.original"],
-  md5: ["file.hash.md5"],
-  sha1: ["file.hash.sha1"],
-  sha256: ["file.hash.sha256"]
-};
+const DEFAULT_IOC_FIELDS = DEFAULT_IOC_FIELD_MAPPING;
 
 export function buildIOCBulkSearchBody(params: IOCBulkSearchBodyParams) {
   const fieldValues = new Map<string, Set<string>>();
   for (const ioc of params.iocs) {
-    for (const field of DEFAULT_IOC_FIELDS[ioc.type] ?? []) {
+    for (const field of DEFAULT_IOC_FIELDS[ioc.type as keyof IOCFieldMapping] ?? []) {
       const values = fieldValues.get(field) ?? new Set<string>();
       values.add(ioc.normalized);
       fieldValues.set(field, values);
@@ -73,7 +67,7 @@ export function buildIOCBulkSearchBody(params: IOCBulkSearchBodyParams) {
     terms: { [field]: [...values] }
   }));
   const filters = Object.fromEntries(params.iocs.map((ioc, index) => {
-    const fields = DEFAULT_IOC_FIELDS[ioc.type] ?? [];
+    const fields = DEFAULT_IOC_FIELDS[ioc.type as keyof IOCFieldMapping] ?? [];
     return [`ioc_${index}`, {
       bool: {
         should: fields.map((field) => ({ term: { [field]: ioc.normalized } })),

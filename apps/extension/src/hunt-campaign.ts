@@ -1,4 +1,5 @@
 import { classifyIOC } from "@soc-watch/ioc";
+import { iocHuntGroupSchema, type IocHuntGroup, type IocHuntCoverage } from "@soc-watch/protocol";
 import { z } from "zod";
 import { collectThreatIntelSnapshot, type ThreatIntelIOC, type ThreatIntelProviderStatus } from "./threat-intel";
 
@@ -9,6 +10,12 @@ export const HUNT_CAMPAIGN_LEASE_MS = 2 * 60 * 1000;
 export const HUNT_CAMPAIGN_MAX_IOCS = 100_000;
 export const HUNT_CAMPAIGN_MAX_BYTES = 6 * 1024 * 1024;
 export const HUNT_BATCH_LIMIT = 500;
+
+export class HuntCampaignError extends Error {
+  constructor(message: string, readonly recovery: "fresh_scan" | "retry", readonly nextBatchOffset?: number) {
+    super(message);
+  }
+}
 
 const countSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const textSchema = z.string().max(16_384);
@@ -50,6 +57,14 @@ const retrySchema = z.object({
   failedAt: z.string().datetime(),
   message: textSchema
 }).strict();
+const progressSchema = z.object({
+  nextBatchOffset: countSchema,
+  checked: countSchema,
+  excluded: countSchema,
+  completedBatches: countSchema,
+  retry: retrySchema.nullable()
+}).strict();
+const emptyProgress = () => ({ nextBatchOffset: 0, checked: 0, excluded: 0, completedBatches: 0, retry: null });
 const campaignSchema = z.object({
   schemaVersion: z.literal(1),
   campaignId: z.string().uuid(),
@@ -64,22 +79,20 @@ const campaignSchema = z.object({
     excludedAtCreation: countSchema,
     truncated: countSchema
   }).strict(),
-  progress: z.object({
-    nextBatchOffset: countSchema,
-    checked: countSchema,
-    excluded: countSchema,
-    completedBatches: countSchema,
-    retry: retrySchema.nullable()
-  }).strict()
+  progress: progressSchema,
+  // Older mixed campaigns retain their cursor; new type queues begin independently.
+  typedProgress: z.object({ ip: progressSchema, domain: progressSchema, hash: progressSchema, url: progressSchema }).strict()
+    .default(() => ({ ip: emptyProgress(), domain: emptyProgress(), hash: emptyProgress(), url: emptyProgress() }))
 }).strict().refine((campaign) => {
   const { stats, progress, iocs } = campaign;
+  const validProgress = (value: z.infer<typeof progressSchema>, length: number) => value.nextBatchOffset <= length
+    && value.checked + value.excluded === value.nextBatchOffset
+    && value.completedBatches <= value.nextBatchOffset
+    && (!value.retry || (value.retry.batchOffset === value.nextBatchOffset && value.retry.batchOffset + value.retry.batchSize <= length));
   return stats.totalAvailable === iocs.length
     && stats.totalFetched === iocs.length + stats.excludedAtCreation + stats.truncated
-    && progress.nextBatchOffset <= iocs.length
-    && progress.checked + progress.excluded === progress.nextBatchOffset
-    && progress.completedBatches <= progress.nextBatchOffset
-    && (!progress.retry || (progress.retry.batchOffset === progress.nextBatchOffset
-      && progress.retry.batchOffset + progress.retry.batchSize <= iocs.length))
+    && validProgress(progress, iocs.length)
+    && Object.entries(campaign.typedProgress).every(([group, value]) => validProgress(value, iocs.filter((ioc) => matchesGroup(ioc, group as IocHuntGroup)).length))
     && Date.parse(campaign.expiresAt) === Date.parse(campaign.createdAt) + HUNT_CAMPAIGN_TTL_MS
     && new Set(iocs.map((ioc) => `${ioc.type}:${ioc.normalized}`)).size === iocs.length;
 }, "Invalid campaign progress or snapshot.");
@@ -89,13 +102,18 @@ const leaseSchema = z.object({
 }).strict();
 
 export type HuntCampaign = z.infer<typeof campaignSchema>;
-export type HuntCampaignParams = z.infer<typeof querySchema> & { maxIocs: number; batchOffset: number };
+export type HuntCampaignParams = z.infer<typeof querySchema> & {
+  maxIocs: number; batchOffset: number; resumeCampaign?: boolean | undefined;
+  indicatorGroup?: IocHuntGroup | undefined; campaignId?: string | undefined;
+};
 export interface HuntCampaignBatch<T> {
   campaignId: string;
   createdAt: string;
   expiresAt: string;
   stats: HuntCampaign["stats"];
   progress: HuntCampaign["progress"];
+  indicatorGroup: IocHuntGroup;
+  coverage: IocHuntCoverage;
   iocs: ThreatIntelIOC[];
   providers: ThreatIntelProviderStatus[];
   results: T[];
@@ -116,6 +134,7 @@ export async function runHuntCampaignBatch<T>(
     query: (iocs: ThreatIntelIOC[]) => Promise<T[]>;
   }
 ): Promise<HuntCampaignBatch<T>> {
+  const group = iocHuntGroupSchema.parse(params.indicatorGroup ?? "all");
   const query = querySchema.parse({
     indexPattern: params.indexPattern,
     timestampField: params.timestampField,
@@ -127,12 +146,12 @@ export async function runHuntCampaignBatch<T>(
     throw new Error("Invalid IOC hunt batch parameters.");
   }
   const locks = globalThis.navigator?.locks;
-  if (!locks) throw new Error("IOC hunt campaign locking is unavailable.");
+  if (!locks) throw new HuntCampaignError("IOC hunt campaign locking is unavailable. Reload the extension and retry.", "retry");
   return locks.request(HUNT_CAMPAIGN_KEY, { ifAvailable: true }, async (lock) => {
-    if (!lock) throw new Error("An IOC hunt is already running. Retry when it finishes.");
+    if (!lock) throw new HuntCampaignError("An IOC hunt is already running. Retry when it finishes.", "retry");
     return withCampaignLease(async (assertOwned) => {
       let campaign: HuntCampaign;
-      if (params.batchOffset === 0) {
+      if (params.batchOffset === 0 && !params.resumeCampaign) {
         const collection = await collectThreatIntelSnapshot(options.include);
         const createdAt = Date.now();
         campaign = campaignSchema.parse({
@@ -158,25 +177,31 @@ export async function runHuntCampaignBatch<T>(
         const stored = await chrome.storage.local.get(HUNT_CAMPAIGN_KEY);
         const parsed = campaignSchema.safeParse(stored[HUNT_CAMPAIGN_KEY]);
         if (!parsed.success || snapshotBytes(parsed.data) > HUNT_CAMPAIGN_MAX_BYTES) {
-          throw new Error("IOC hunt campaign is missing or invalid. Start a Fresh Scan.");
+          throw new HuntCampaignError("IOC hunt campaign is missing or invalid. Start a Fresh Scan.", "fresh_scan");
         }
         campaign = parsed.data;
         if (Date.parse(campaign.createdAt) > Date.now() || Date.parse(campaign.expiresAt) <= Date.now()) {
-          throw new Error("IOC hunt campaign has expired. Start a Fresh Scan.");
+          throw new HuntCampaignError("IOC hunt campaign has expired. Start a Fresh Scan.", "fresh_scan");
         }
         if (Object.keys(query).some((key) => query[key as keyof typeof query] !== campaign.query[key as keyof typeof query])) {
-          throw new Error("IOC hunt query does not match the saved campaign. Start a Fresh Scan.");
+          throw new HuntCampaignError("IOC hunt query does not match the saved campaign. The index, time field or time range changed. Start a Fresh Scan.", "fresh_scan");
         }
-        if (params.batchOffset !== campaign.progress.nextBatchOffset) {
-          throw new Error(`IOC hunt offset does not match campaign progress. Retry offset ${campaign.progress.nextBatchOffset}, or start a Fresh Scan.`);
+        if (params.campaignId !== undefined && params.campaignId !== campaign.campaignId) {
+          throw new HuntCampaignError("Another Fresh Scan replaced this IOC campaign. Start a Fresh Scan to synchronize this console.", "fresh_scan");
+        }
+        const progress = group === "all" ? campaign.progress : campaign.typedProgress[group];
+        if (params.batchOffset !== progress.nextBatchOffset) {
+          throw new HuntCampaignError(`IOC hunt offset does not match ${group} campaign progress. Retry offset ${progress.nextBatchOffset}, or start a Fresh Scan.`, "retry", progress.nextBatchOffset);
         }
       }
 
-      const batchLimit = campaign.progress.retry?.batchSize ?? Math.min(params.maxIocs, HUNT_BATCH_LIMIT);
+      let progress = group === "all" ? campaign.progress : campaign.typedProgress[group];
+      const queue = campaign.iocs.filter((ioc) => matchesGroup(ioc, group));
+      const batchLimit = progress.retry?.batchSize ?? Math.min(params.maxIocs, HUNT_BATCH_LIMIT);
       // Slice first: changes to exclusions must never move later snapshot offsets.
-      const selected = campaign.iocs.slice(params.batchOffset, params.batchOffset + batchLimit);
+      const selected = queue.slice(params.batchOffset, params.batchOffset + batchLimit);
       const iocs = selected.filter(options.include);
-      const batchNumber = campaign.progress.completedBatches + (selected.length > 0 ? 1 : 0);
+      const batchNumber = progress.completedBatches + (selected.length > 0 ? 1 : 0);
       let results: T[] = [];
       let error: string | undefined;
       await assertOwned();
@@ -189,18 +214,20 @@ export async function runHuntCampaignBatch<T>(
       }
       await assertOwned();
       if (selected.length > 0) {
-        campaign.progress = error !== undefined
+        progress = error !== undefined
           ? {
-              ...campaign.progress,
+              ...progress,
               retry: { batchOffset: params.batchOffset, batchSize: selected.length, failedAt: new Date().toISOString(), message: error }
             }
           : {
               nextBatchOffset: params.batchOffset + selected.length,
-              checked: campaign.progress.checked + iocs.length,
-              excluded: campaign.progress.excluded + selected.length - iocs.length,
-              completedBatches: campaign.progress.completedBatches + 1,
+              checked: progress.checked + iocs.length,
+              excluded: progress.excluded + selected.length - iocs.length,
+              completedBatches: progress.completedBatches + 1,
               retry: null
             };
+        if (group === "all") campaign.progress = progress;
+        else campaign.typedProgress[group] = progress;
         await chrome.storage.local.set({ [HUNT_CAMPAIGN_KEY]: campaign });
       }
       return {
@@ -208,7 +235,9 @@ export async function runHuntCampaignBatch<T>(
         createdAt: campaign.createdAt,
         expiresAt: campaign.expiresAt,
         stats: campaign.stats,
-        progress: campaign.progress,
+        progress,
+        indicatorGroup: group,
+        coverage: campaignCoverage(campaign),
         iocs,
         providers: campaign.providers.map(({ message, ...provider }) => ({
           ...provider,
@@ -218,14 +247,26 @@ export async function runHuntCampaignBatch<T>(
         batchNumber: Math.max(1, batchNumber),
         batchOffset: params.batchOffset,
         batchSize: selected.length,
-        totalAvailable: campaign.iocs.length,
-        nextBatchOffset: campaign.progress.nextBatchOffset,
-        hasMore: campaign.progress.nextBatchOffset < campaign.iocs.length,
-        retryBatchOffset: campaign.progress.retry?.batchOffset ?? null,
+        totalAvailable: queue.length,
+        nextBatchOffset: progress.nextBatchOffset,
+        hasMore: progress.nextBatchOffset < queue.length,
+        retryBatchOffset: progress.retry?.batchOffset ?? null,
         ...(error !== undefined ? { error } : {})
       };
     });
   });
+}
+
+function matchesGroup(ioc: ThreatIntelIOC, group: IocHuntGroup): boolean {
+  return group === "all" || (group === "hash" ? ["md5", "sha1", "sha256"].includes(ioc.type) : ioc.type === group);
+}
+
+function campaignCoverage(campaign: HuntCampaign): IocHuntCoverage {
+  return Object.fromEntries(iocHuntGroupSchema.options.map((group) => {
+    const totalAvailable = campaign.iocs.filter((ioc) => matchesGroup(ioc, group)).length;
+    const progress = group === "all" ? campaign.progress : campaign.typedProgress[group];
+    return [group, { totalAvailable, checked: progress.checked, excluded: progress.excluded, nextBatchOffset: progress.nextBatchOffset, hasMore: progress.nextBatchOffset < totalAvailable }];
+  })) as IocHuntCoverage;
 }
 
 function snapshotBytes(campaign: HuntCampaign): number {
@@ -255,7 +296,7 @@ async function withCampaignLease<T>(operation: (assertOwned: () => Promise<void>
   const stored = await chrome.storage.local.get(HUNT_CAMPAIGN_LEASE_KEY);
   const existing = leaseSchema.safeParse(stored[HUNT_CAMPAIGN_LEASE_KEY]);
   if (existing.success && existing.data.expiresAt > Date.now()) {
-    throw new Error("An IOC hunt is already running. Retry after its busy lease expires.");
+    throw new HuntCampaignError("An IOC hunt is already running. Retry after its busy lease expires.", "retry");
   }
   const token = crypto.randomUUID();
   const writeLease = () => chrome.storage.local.set({
@@ -267,7 +308,7 @@ async function withCampaignLease<T>(operation: (assertOwned: () => Promise<void>
     const current = await chrome.storage.local.get(HUNT_CAMPAIGN_LEASE_KEY);
     const lease = leaseSchema.safeParse(current[HUNT_CAMPAIGN_LEASE_KEY]);
     if (leaseFailed || !lease.success || lease.data.token !== token || lease.data.expiresAt <= Date.now()) {
-      throw new Error("IOC hunt busy lease was lost. Retry the saved campaign offset.");
+      throw new HuntCampaignError("IOC hunt busy lease was lost. Retry the saved campaign offset.", "retry");
     }
   };
   let renewal = Promise.resolve();
